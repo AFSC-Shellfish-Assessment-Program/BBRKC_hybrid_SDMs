@@ -1,0 +1,1947 @@
+---
+title: "RKC movement model results"
+output: html_document
+date: "2025-03-18"
+---
+
+## Setup
+
+```{r setup, echo=T, warning=F, message=F}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, fig.align = 'center')
+library(tidyverse)
+library(raster)
+library(Matrix)
+library(RTMB)
+library(patchwork)
+library(cowplot)
+library(sf)
+library(stars)
+library(circular)
+library(gt)
+library(mgcv)
+library(ggtext)
+library(sdmTMB)
+library(gratia)
+library(concaveman)
+
+ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
+
+# boundary and grid data
+load(here::here("data/spatial_layers.rdata"))
+
+nbbtca <- other_sa %>% filter(name == "NBBTCA")
+process <- F
+
+# load model particulars-----
+
+# load temperature data (october bottom temps from ROMS)----
+load(here::here('data/agg_temp_interannual_sum_aut_mom6.rdata'))
+
+# load bathymetry data----
+load(here::here("data/agg_depth.rdata"))
+
+# load sediment grain size data----
+load(here::here("data/agg_phi.rdata"))
+
+# load maxmimum tidal current data----
+load(here::here("data/agg_tc.rdata"))
+
+## fitted spatiotemporal model outputs-----
+load(here::here("data/st_model_predictions.rdata"))
+
+## movement LOOCV
+load(here::here("data/movement_model_LOOCV_stats.rdata"))
+
+## fitted movement models-----
+load(here::here("data/fitted_movement_models.rdata"))
+
+## movement model particulars----
+load(here::here("data/movement_model_particulars.rdata"))
+
+# source movement model----
+source(here::here("R/mm.R"))
+
+## projection function----
+source(here::here("R/project_distribution.R"))
+
+## marginal effects function
+source(here::here("R/effectDT.R"))
+
+# helper functions
+source(here::here("R/helpers.R"))
+
+# logbook data (unavailable online)-----
+lb <- read_csv(here::here("data/rkc.logbook.clean.csv")) %>%
+  dplyr::select(-1) %>%
+  st_as_sf(., coords = c('longitude','latitude'), crs = 4326) %>%
+  st_transform(., crs = ak_crs)
+
+#combined environmental covariates
+env_cov_full <- agg_temp_interannual_sum_aut %>%
+  filter(year %in% 2005:2023) %>%
+  st_join(., agg_phi %>%
+            st_centroid(.)) %>%
+  st_join(., agg_depth %>%
+            st_centroid(.)) %>%
+  st_join(., agg_tc %>%
+            st_centroid(.)) %>%
+  filter(!is.na(depth) & !is.na(temp) & !is.na(phi) & !is.na(tidal_curr)) %>% 
+  st_intersection(., ebs)
+
+# sf object limited from 2021-2023
+env_cov <- env_cov_full %>% filter(year %in% 2021:2023,
+                                   month == 10)
+
+# for predicting from the model
+env_cov_full_df <- 
+  env_cov_full %>% 
+  filter(month == 10) %>%
+  group_by(year) %>%
+  mutate(id = 1:n()) %>%
+  st_set_geometry(NULL) %>%
+  mutate(y = 0) %>%
+  arrange(year, id) %>%
+  ungroup() %>%
+  mutate(id2 = 1:nrow(.),
+         yf = factor(year))
+
+# crab tagging data (EPSG: 4326)
+m2021 <-
+  read_csv(here::here("data/2021_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rel_lon,
+         deploy_lat = rel_lat) %>%
+  mutate(tag = factor(tag)) %>%
+  mutate(year = 2021)
+
+m2022 <-
+  read_csv(here::here("data/2022_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rellongdd,
+         deploy_lat = rellatdd) %>%
+  mutate(tag = factor(tag)) %>%
+  mutate(year = 2022)
+
+m2023 <-
+  read_csv(here::here("data/2023_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rellongdd,
+         deploy_lat = releaselatdd) %>%
+  mutate(tag = factor(tag)) %>%
+  mutate(year = 2023)
+
+oos_obs_movement <-
+  bind_rows(
+    m2021 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year),
+    m2022 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year),
+    m2023 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year)
+  ) %>% 
+  {. ->> oos_obs_movement_4326} %>% 
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL)
+
+# deployment locations-----
+sf_s0_locs <- oos_obs_movement %>%
+  dplyr::select(deploy_lon, deploy_lat, year, tag) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"),
+           crs = ak_crs)
+
+sf_s1_locs <- oos_obs_movement %>%
+  dplyr::select(lon0, lat0, year, tag) %>%
+  st_as_sf(., coords = c("lon0","lat0"),
+           crs = ak_crs)
+```
+
+## Fitted movement models
+
+The bolded model indicates the selected model used to create subsequent figures.
+
+```{r}
+mod_tab <-
+  tibble(formula =
+    c(as.character(m1.t$formula)[2],
+      as.character(m2.t$formula)[2],
+      as.character(m3.t$formula)[2],
+      as.character(m4.t$formula)[2],
+      as.character(m5.t$formula)[2],
+      as.character(m6.t$formula)[2]
+      ),
+         AIC = c(m1.t$AIC,
+                 m2.t$AIC,
+                 m3.t$AIC,
+                 m4.t$AIC,
+                 m5.t$AIC,
+                 m6.t$AIC
+                 ),
+         n_pars = c(length(m1.t$sd$par.fixed),
+                    length(m2.t$sd$par.fixed),
+                    length(m3.t$sd$par.fixed),
+                    length(m4.t$sd$par.fixed),
+                    length(m5.t$sd$par.fixed),
+                    length(m6.t$sd$par.fixed)
+                    ),
+    did_converge = c(m1.t$opt$message,
+                    m2.t$opt$message,
+                    m3.t$opt$message,
+                    m4.t$opt$message,
+                    m5.t$opt$message,
+                    m6.t$opt$message
+                    ),
+  mod_num = 1:6) %>%
+  left_join(., movement_rmse) %>%
+  filter(did_converge == "relative convergence (4)") %>% 
+  arrange(AIC) %>%
+  mutate(delta_AIC = AIC - first(AIC)) %>%
+  mutate_if(is.numeric, round, 2) %>%
+  dplyr::select(formula, n_pars, AIC, delta_AIC, mod_num, `RMSE` = value) %>% 
+  mutate(formula = str_replace_all(formula, "tidal_curr", "velocity"),
+         formula = str_replace_all(formula, "temp", "temp"),
+         formula = str_remove_all(formula, "0 \\+"),
+         formula = ifelse(is.na(formula), "diffusion only",formula))
+
+
+tb1 <- gt(data = mod_tab) %>%
+  cols_label(
+    formula = md("**Habitat preference formula**"),
+    n_pars = md("**N pars.**"),
+    AIC = md("**AIC**"),
+    delta_AIC = md("**&Delta;AIC**"),
+    mod_num = md("**Model number**"),
+    RMSE = md("**RMSE**")
+  ) %>%
+    tab_style(
+      style = list(
+        cell_text(weight = "bold")
+        ),
+      locations = cells_body(
+        rows = AIC == min(AIC)
+      )
+  ) %>% 
+  opt_align_table_header(align = "center") %>% 
+  opt_table_font(font = "Times")
+
+# tb1
+tb1 %>%
+  gtsave(., filename = here::here("figs/tables/table2.docx"))
+
+# select model-----
+
+## model matrix 
+X_sz <- m5.t$model_matrix
+
+# estimated parameters from selected model
+ests <- m5.t$sd$par.fixed
+
+## fitted habitat preference model
+f_mod1 <- m5.t$preference_model
+
+pref_mod <- m5.t
+```
+
+# Extract environmental data at tag release and pop-up locations
+
+### Data summaries
+
+```{r, fig.width = 8.5, fig.height=3, dpi = 300}
+combined_env <- NULL
+for (i in 2021:2023){
+  deploy_env <- st_intersection(sf_s0_locs %>% 
+                                  filter(year == i),
+                                 env_cov_full %>% 
+                                  filter(year == i,
+                                         month == 6)) %>%
+    mutate(state = factor("Deployment (June)",
+                          levels = c("Deployment (June)",
+                                          "Pop-up (October)"))) %>% 
+    dplyr::select(-year.1)
+  
+  
+  pop_up_env <- st_intersection(sf_s1_locs %>% 
+                                  filter(year == i),
+                                 env_cov_full %>% 
+                                  filter(year == i,
+                                         month == 10)) %>%
+    mutate(state = factor("Pop-up (October)",
+                          levels = c("Deployment (June)",
+                                          "Pop-up (October)"))) %>% 
+    dplyr::select(-year.1)
+  
+  assign("combined_env", rbind(combined_env,
+                               rbind(deploy_env,
+                                     pop_up_env)))
+}
+
+# ggplot() + 
+#   geom_sf(data = ak_land) +
+#   geom_sf(data = agg_depth, aes(fill = depth)) +
+#   geom_sf(data = sf_s0_locs %>% filter(tag %in% c("244083", "244062"))) +
+#   geom_sf(data = sf_s1_locs %>% filter(tag %in% c("244083", "244062")), color = "red") +
+#   coord_sf(datum = ak_crs,
+#            xlim = c(-600, -400),
+#            ylim = c(600, 800))
+
+# individual changes in depth occupied between June and October
+depth_change <- 
+  combined_env %>% 
+    st_set_geometry(NULL) %>% 
+    dplyr::select(depth, state, tag) %>% 
+    group_by(state) %>%  
+    pivot_wider(id_cols = "tag", values_from = "depth", 
+                names_from = "state") %>% 
+    mutate(depth_change = `Deployment (June)` - `Pop-up (October)`) 
+
+# What percentage of tagged crab moved shallower between June-October?
+(nrow(depth_change %>% filter(depth_change < 0))/nrow(depth_change))*100
+
+shallower_tags <- depth_change %>% filter(depth_change > 0) %>% pull(tag) 
+  
+# summarise polygon of closure areas (NBBTCA + RKCSA/SSA)
+tsf <- manage_sf %>% 
+  filter(name != "BB survey") %>% 
+  summarise() %>% 
+  st_transform(., crs = ak_crs) %>% 
+  bind_rows(nbbtca %>% 
+              dplyr::select(geometry) %>% 
+              st_transform(., crs = ak_crs)) %>% 
+  summarise()
+
+# extract tags released in closure areas
+init <- st_intersection(tsf,
+                sf_s0_locs)
+
+# extract tags released east of -164 but not in a closure area
+intermediate_tags <- 
+  sf_s0_locs %>% 
+  filter(!tag %in% init$tag) %>% # exclude tags released inside closure areas
+  st_transform(., crs = 4326) %>% 
+  sfc_as_cols(., names = c("lon","lat")) %>% 
+  st_set_geometry(NULL) %>% 
+  filter(lon >= -164) %>% # find tags released east of -164
+  pull(tag)
+
+
+# extract tags tagged west of -164
+west_tags <- 
+  sf_s0_locs %>% 
+  st_transform(., crs = 4326) %>% 
+  sfc_as_cols(., names = c("lon","lat")) %>% 
+  st_set_geometry(NULL) %>% 
+  filter(lon <= -164) %>% 
+  pull(tag)
+
+# length(west_tags) + length(intermediate_tags) + length(init$tag) == 63
+
+# count tags released in closure areas that pop-up in closure areas
+st_intersection(tsf,
+                sf_s1_locs %>% 
+                  filter(tag %in% init$tag)) %>% 
+  nrow()
+
+# count tags released east of -164 that popped-up in closure areas
+st_intersection(tsf,
+                sf_s1_locs %>% 
+                  filter(tag %in% intermediate_tags)) %>% 
+  nrow()
+
+# count tags released west of -164 that pop-up in closure areas
+st_intersection(tsf,
+                sf_s1_locs %>% 
+                  filter(tag %in% west_tags)) %>% 
+  nrow()
+
+# count tags released in closure areas popping up in RKCSA/SSA specifically
+st_intersection(
+  manage_sf %>% 
+  filter(name != "BB survey") %>% 
+  summarise() %>% 
+  st_transform(., crs = ak_crs),
+  sf_s1_locs %>% 
+        filter(tag %in% init$tag)
+) %>% 
+  nrow()
+
+# count tags (all considered) that pop-up in closure areas
+st_intersection(tsf,
+                sf_s1_locs)
+
+# st_intersection(tsf,
+#                 cbb_tags) %>% 
+#   nrow()/nrow(cbb_tags) * 100
+
+# extract information about the distances traveled by tagged crab
+distance_traveled <- NULL
+for (y in 2021:2023){
+  
+  t1 <- sf_s1_locs %>% filter(year == y) %>% arrange(tag) %>% pull(tag) %>% fct_to_num()
+  t2 <- sf_s0_locs %>% filter(year == y) %>% arrange(tag) %>% pull(tag) %>% fct_to_num()
+  print(all(t1 == t2))
+  
+  dists <- 
+    st_distance(
+      sf_s1_locs %>% filter(year == y) %>% arrange(tag),
+      sf_s0_locs %>% filter(year == y) %>% arrange(tag),
+      by_element = T
+    ) %>% 
+    as_tibble() %>% 
+    dplyr::rename(dist = 1) %>% 
+    mutate(year = y)
+  
+    dists$tag <- t1
+    
+    assign("distance_traveled", rbind(dists, distance_traveled))
+}
+
+# mean/sd distance traveled across all years
+mean(distance_traveled$dist)
+sd(distance_traveled$dist)
+
+# avg movement rates across all years
+distance_traveled %>% 
+  left_join(., oos_obs_movement %>% 
+              dplyr::mutate(tag = fct_to_num(tag)), 
+            by = c("year", "tag")) %>% 
+  mutate(movement_rate = as.numeric(dist)/deploy_days) %>% 
+  dplyr::summarise(mean_movement_rate  = mean(movement_rate),
+                   sd_movement_rate = sd(movement_rate))
+
+# crab distance traveled when released in closure areas
+distance_traveled %>% 
+  filter(tag %in% init$tag) %>% 
+  dplyr::summarise(m_dist = mean(dist),
+                   sd_dist = sd(dist))
+
+# crab distance traveled when released west of -164
+distance_traveled %>% 
+  filter(tag %in% west_tags) %>% 
+  dplyr::summarise(m_dist = mean(dist),
+                   sd_dist = sd(dist))
+
+# crab distance traveled when released outside closure areas
+distance_traveled %>% 
+  filter(!tag %in% init$tag) %>% 
+  dplyr::summarise(m_dist = mean(dist),
+                   sd_dist = sd(dist))
+
+# movement directions
+compute_bearing <- function(start_easting, start_northing, end_easting, end_northing) {
+  dx <- end_easting - start_easting
+  dy <- end_northing - start_northing
+  
+  # angle in radians
+  angle_rad <- atan2(dx, dy)
+  
+  # convert angle to degrees
+  angle_deg <- angle_rad * (180 / pi)
+  
+  # adjust angle to compass bearing (0 to 360 degrees)
+  bearing <- (angle_deg + 360) %% 360
+  
+  return(bearing)
+}
+
+# bearing for crab movement (all tags)
+oos_obs_movement$bearing <- compute_bearing(start_easting = oos_obs_movement$deploy_lon,
+                              start_northing = oos_obs_movement$deploy_lat,
+                              end_easting = oos_obs_movement$lon0,
+                              end_northing = oos_obs_movement$lat0)
+
+summ_stat_circ <- function(x, stat = "mean"){
+  cdat <- 
+  circular(x,
+         units = "degrees",
+         template = "geographics",
+         modulo = "2pi")
+  if (stat == "mean"){
+   out <- mean.circular(cdat) %>% 
+      as.numeric(.)
+  } else if (stat == "sd"){
+   out <-  sd.circular(cdat) %>% 
+      as.numeric(.) * 180 / pi
+  }
+  return(out)
+}
+summ_stat_circ(oos_obs_movement$bearing,
+               stat = "mean")
+summ_stat_circ(oos_obs_movement$bearing,
+               stat = "sd")
+
+# bearing for crab released in closure areas
+oos_obs_movement %>% 
+  filter(tag %in% init$tag) %>% 
+  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
+                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+
+# bearing for crab not released in closure areas
+oos_obs_movement %>% 
+  filter(!tag %in% init$tag) %>% 
+  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
+                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+
+# bearing for crab released west of -164
+oos_obs_movement %>% 
+  filter(tag %in% west_tags) %>% 
+  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
+                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+
+
+# movement comparisons (t test and watson williams test)------
+
+## distance traveled----
+dist_comp_df <- 
+  distance_traveled %>% 
+  mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")),
+         dist = as.numeric(dist))
+
+t.test(dist ~ east_west, data = dist_comp_df)
+
+## bearing----
+dir_comp_df <- 
+  oos_obs_movement  %>% 
+  mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")))
+
+west_bear <- circular(dir_comp_df %>% filter(east_west == "west") %>% pull(bearing),
+         units = "degrees",
+         template = "geographics",
+         modulo = "2pi")
+
+east_bear <- circular(dir_comp_df %>% filter(east_west == "east") %>% pull(bearing),
+         units = "degrees",
+         template = "geographics",
+         modulo = "2pi")
+
+
+# combine and label
+angles <- c(west_bear, east_bear)
+grp    <- factor(rep(c("west", "east"), c(length(west_bear), length(east_bear))))
+
+# Watson–Williams test for comparing groups of angles
+watson.williams.test(angles, grp)
+```
+
+## Marginal habitat preference smooths
+
+```{r, fig.width = 9, fig.height=5}
+
+# data for prediction grid
+min_depth <- env_cov_full_df %>%
+  pull(depth) %>% 
+  min()
+
+max_depth <- env_cov_full_df %>% 
+  pull(depth) %>%
+  max()
+
+min_tc <- env_cov_full_df %>% 
+  pull(tidal_curr) %>% 
+  min()
+
+max_tc <- env_cov_full_df %>%
+  pull(tidal_curr) %>% 
+  max()
+
+mean_temp <- env_cov_full_df %>%
+  filter(year %in% c(2021:2023)) %>% 
+  pull(temp) %>% 
+  mean()
+
+# prediction grid where temperature is held at the mean (for 2D pref. figure)
+pref_surf <- 
+  tibble(tidal_curr = seq(min_tc, max_tc, length.out = 50)) %>% 
+  expand_grid(depth = seq(min_depth, max_depth, length.out = 50)) %>% 
+  mutate(temp = mean_temp) 
+
+# Extract model components
+Xpred <- predict(f_mod1, newdata = pref_surf, type = "lpmatrix")
+ests <- pref_mod$sd$par.fixed
+ests <- ests[names(ests) != "ln_D"]
+cov_mat <- pref_mod$sd$cov.fixed
+cov_mat <- cov_mat[-which(rownames(cov_mat) == "ln_D"), -which(colnames(cov_mat) == "ln_D")]
+
+# centered preference predictions in space
+pref_surf$preference <- as.numeric(scale(Xpred %*% ests, center = T, scale = F))
+
+# extract range of tidal currents and depths where preference is high
+pref_surf %>% 
+  filter(preference > quantile(pref_surf$preference)[4]) %>% 
+  pull(tidal_curr) %>% 
+  range()
+
+pref_surf %>% 
+  filter(preference > quantile(pref_surf$preference)[4]) %>% 
+  pull(depth) %>% 
+  range()
+
+# pull out a year of data to constrain the prediction grid to combinations
+# of depth and tidal current that are actually observed. Doesn't matter which
+# year because depth and tidal current are static variables.
+env_cov_full_df_2021 <- env_cov_full_df %>% 
+  filter(year == 2021) %>% 
+  dplyr::select(tidal_curr, depth) %>% 
+  distinct()
+
+# constrain the prediction grid for visualizing
+pref_surf_constrained <- pref_surf %>%
+    rowwise() %>%
+    mutate(
+        ok = any(
+            (abs(tidal_curr - env_cov_full_df_2021$tidal_curr) <= 
+               env_cov_full_df_2021$tidal_curr * 0.1) &
+                (abs(depth      - env_cov_full_df_2021$depth     ) <= 
+                   abs(env_cov_full_df_2021$depth) * 0.1)
+        ),
+        preference = if_else(ok, preference, NA_real_)
+    ) %>%
+    ungroup() %>%
+    dplyr::select(-ok) %>% 
+  filter(depth >  22.5)
+
+
+# marginal smooth effect of bottom temperature on preference
+temp_effect <- 
+  effectDT(model = pref_mod,
+           df = env_cov_full_df %>% filter(year %in% 2021:2023),
+            terms = "temp") 
+
+# visualize marginal effect smooths
+temp_smooth_plt <-
+  ggplot(temp_effect) + 
+  geom_rug(data = combined_env,
+           aes(x = temp, color = state), 
+           sides = "b", alpha = 0.6) +
+  geom_ribbon(aes(ymax = pref_upr, ymin = pref_lwr, x = x), alpha = 0.2) +
+  geom_line(aes(y = pref, x = x)) + 
+  labs(y = "Habitat preference",
+       x = "Bottom Temp. (°C)",
+       color = "") +
+  scale_color_manual(values = c("Deployment (June)" = "black",
+                                "Pop-up (October)" = "purple")) +
+    theme_fade() +
+    theme(axis.title.x = element_markdown(size = 12),
+          axis.title.y = element_markdown(size = 12))
+
+# 2D marginal smooth of depth-tidal current interaction
+fill_lims <- range(pref_surf_constrained$preference)
+depth_tc_effect_plt <- 
+  ggplot(pref_surf_constrained,aes(y = depth, 
+                     x = tidal_curr)) +
+  geom_raster(aes(fill = preference), show.legend = T) + 
+  geom_contour(aes(z = preference), color = "black") + 
+  geom_point(data = combined_env,
+           aes(y = depth, x = tidal_curr, color = state), size = 2) +
+    scale_color_manual(values = c("Deployment (June)" = "black",
+                                "Pop-up (October)" = "purple")) +
+  theme_fade() +
+  scale_fill_gradientn(
+    limits = fill_lims,
+    colors = pals::viridis(100),
+    name = "Habitat preference"
+  )  +
+  labs(y = "Depth (m)",
+       x = "Maximum tidal current (cm s<sup>-1</sup>)",
+       color = "") +
+  scale_x_continuous(expand = c(0.01, 0.01)) +
+  scale_y_continuous(expand = c(0.01, 0.01)) +
+    theme(axis.title.x = element_markdown(size = 12),
+          axis.title.y = element_markdown(size = 12),
+          legend.background = element_rect(fill = "transparent"), 
+          legend.key = element_rect(fill = "transparent",
+                                    color = "transparent"))
+
+marg_prefs <- 
+  (temp_smooth_plt + depth_tc_effect_plt) + 
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_prefix = "(", tag_suffix = ")", tag_levels = "a")
+marg_prefs
+ggsave(marg_prefs, file = here::here("figs/marginal_preference_smooths/marginal_preference_smooths2.svg"),
+       width = 9,
+       height = 3.5,
+       dpi = 300)
+
+# parsing the interaction effect a bit more
+pref_surf_constrained %>% 
+  filter(tidal_curr > median(env_cov_full_df$tidal_curr, na.rm = T),
+         preference > quantile(pref_surf_constrained$preference, na.rm = T,
+                               0.90)) %>% 
+  pull(depth) %>% 
+  range()
+
+pref_surf_constrained %>% 
+  filter(tidal_curr < median(env_cov_full_df$tidal_curr, na.rm = T),
+         preference > quantile(pref_surf_constrained$preference, na.rm = T,
+                               0.90)) %>% 
+  pull(depth) %>% 
+  range()
+```
+
+# Visualize Bristol Bay habitat preferences
+
+```{r, fig.width = 9, fig.height=5}
+X_gk_pred <- predict(f_mod1, newdata = env_cov_full_df %>% 
+                       filter(year %in% 2021:2023), type = "lpmatrix")
+len_out <- env_cov_full_df %>% 
+  group_by(year) %>% 
+  dplyr::summarise(n = n()) %>% 
+  pull(n) %>% 
+  unique()
+
+# redo basis expansion to predict over prettier area
+# predict habitat preference over Bristol Bay by year
+pred_g <- tibble(pred_g =
+                   X_gk_pred %*% ests,
+                 year = rep(2021:2023, each = len_out))
+
+# extract preference percentiles for visualizing
+spat_pref <- env_cov_full %>% 
+  filter(month == 10,
+         year %in% 2021) %>% 
+  st_as_sfc() %>%
+  st_as_sf() %>%
+  expand_grid(year = 2021:2023) %>%
+  arrange(year) %>%
+  mutate(
+    preference   = pred_g$pred_g - mean(pred_g$pred_g),
+    pref_percent = percent_rank(preference) * 100,        # 0–100
+    pref_dec     = cut(
+                      pref_percent,
+                      breaks = seq(0, 100, by = 10),
+                      include.lowest = TRUE,
+                      labels = paste0(seq(0, 90, by = 10), 
+                                      "–", seq(10, 100, by = 10), "%")
+                    )
+  ) %>% 
+  st_as_sf() %>% 
+  st_transform(., crs = 4326)
+
+fill_lims2 <- range(spat_pref$preference)
+pref_pal <- pals::brewer.rdylgn(10)
+pref_map <-
+  ggplot() +
+    geom_sf(data = spat_pref ,
+            aes(fill = pref_dec)) +
+    geom_point(data = oos_obs_movement_4326,
+               aes(y = deploy_lat, x = deploy_lon),
+               alpha = 1,
+               size = 0.35,
+                 color = "purple") +
+    geom_segment(data = oos_obs_movement_4326,
+                 aes(y = deploy_lat, x = deploy_lon,
+                     yend = lat0, xend = lon0),
+                 arrow = arrow(length = unit(0.05, "inches")), show.legend = F,
+                 alpha = 1,
+                 linewidth = 0.35,
+                 color = "purple") +
+    scale_fill_manual(values = pref_pal) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+            aes(color = name),
+            fill = "transparent",
+            linewidth = 0.5,
+            show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land) +
+    facet_wrap(~year) +
+    labs(y = "Latitude",
+         x = "Longitude",
+         fill = "Habitat preference\ndecile") +
+      coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    # coord_sf(xlim = c(-850, -200),
+    #          ylim = c(600, 1100),
+    #          datum = ak_crs) +
+    theme_fade() +
+    guides(
+    fill = guide_legend(
+      nrow  = 1,
+      byrow = TRUE,
+      label.position = "bottom",
+      barheight = unit(0.15, "in"),
+      barwidth  = unit(0.05, "in"),
+      direction     = "horizontal"
+    )) +
+    theme(axis.title.x = element_markdown(size = 11),
+          axis.title.y = element_markdown(size = 11),
+          axis.text = element_text(size = 7),
+          strip.text = element_text(size = 10),
+          legend.position = "bottom",
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 11))
+pref_map
+ggsave(pref_map,
+       filename = here::here("figs/habitat_preference_map/habitat_preference_map.png"),
+       width = 8.5,
+       height = 4,
+       dpi = 300)
+```
+
+# Pop-up conditions for tags released inside closure areas
+Note: all tags released in closure areas popped-up in closure areas
+
+```{r}
+tag_cond_out <- NULL
+for (y in 2021:2023){
+  tag_cond_int <- 
+    st_join(sf_s1_locs %>% 
+            filter(year == y) %>% 
+            dplyr::select(-year),
+          env_cov %>% 
+            filter(year == y))  %>% 
+    st_transform(., crs = 4326)
+  assign("tag_cond_out", rbind(tag_cond_int,
+                               tag_cond_out))
+}
+
+tag_cond_out$inside_outside <- ifelse(tag_cond_out$tag %in% init$tag,
+                                      "inside",
+                                      "outisde")
+
+
+
+tag_cond_out %>% 
+  group_by(inside_outside) %>% 
+  dplyr::summarise(m_depth = mean(depth),
+                   sd_depth = sd(depth),
+                   m_tc = mean(tidal_curr),
+                   sd_tc = sd(tidal_curr))
+
+# some simple hypothesis testing: how do pop-up environments differ inside vs.
+# outside closure areas
+t.test(depth ~ inside_outside, data = tag_cond_out)
+t.test(tidal_curr ~ inside_outside, data = tag_cond_out)
+
+# what about east and west of -164?
+tag_cond_out$east_west <- ifelse(tag_cond_out$tag %in% west_tags,
+                                      "west",
+                                      "east")
+tag_cond_out %>% 
+  group_by(east_west) %>% 
+  dplyr::summarise(m_depth = mean(depth),
+                   sd_depth = sd(depth),
+                   m_tc = mean(tidal_curr),
+                   sd_tc = sd(tidal_curr))
+
+# some simple hypothesis testing: how do pop-up environments differ inside vs.
+# outside closure areas
+t.test(depth ~ east_west, data = tag_cond_out)
+t.test(tidal_curr ~ east_west, data = tag_cond_out)
+```
+
+
+# Maps: predictions, projections, CPUE, overlap
+
+### Process landings data and do projections
+
+* Projections done here are for mapping only. 
+* Overlap is estimated later using bootstrap method.
+* Fishery CPUE data are aggregated to grid cell here, and this does matter for overlap (`lb_agg`). 
+* Also calculated here are fishery CPUE centroids that are also important.
+* Between 99.6% and 100% of fishery catch observations fell within the prediction boundary used to calculate overlap across study years. In 2017, 5 of 1199 observations fell outside the prediction grid (99.6%). 
+
+```{r, warning=F, echo = T}
+st_rook <- function(m, ...) st_relate(m, m, pattern="F***1****", ... )
+grid <- pred_grid %>% 
+                    filter(year == 2023,
+                           month == 10) %>% 
+  st_as_sfc()
+grid_A <- st_rook(pred_grid %>% 
+                    filter(year == 2023,
+                           month == 10), sparse=TRUE )
+A_big <- as(grid_A,"sparseMatrix") |> as("TsparseMatrix")
+if (process){
+# average landings to the 25 km x 25 km grid
+lb_agg <- NULL
+lb_cog <- NULL
+ann_proj <- NULL
+for (y in 2005:2023){
+  message(y)
+      if (!y %in% 2021:2022){
+        
+        # aggregate fishery CPUE data to the 625 sq. km grid cell
+        outer_lb <- lb %>%
+          filter(year == y) %>% 
+          aggregate(., by = grid, FUN = mean, na.rm = T) %>%
+          mutate(year = y)
+        
+        # extract fishery CPUE centroids here
+        lb_cog_init <- 
+          lb %>%
+          filter(year == y) %>% 
+          sfc_as_cols(., names = c("lon","lat")) %>% 
+          st_set_geometry(NULL) %>% 
+          filter(lon > -800)
+        
+        lat_cog <- weighted.mean(x = lb_cog_init$lat, w = lb_cog_init$catch_pp)
+        lon_cog <- weighted.mean(x = lb_cog_init$lon, w = lb_cog_init$catch_pp)
+        
+        assign("lb_agg", rbind(lb_agg, outer_lb))
+        assign("lb_cog", rbind(lb_cog, tibble(year = y,
+                                              lat_cog,
+                                              lon_cog)))
+      }
+    if (y != 2020){
+      # density projections only relevant for mapping - spatial overlap
+      # part of script runs simulations to get projection uncertainty
+      ann_proj_int <- project_distribution(
+                                   year = y,
+                                   month = 10,
+                                   DeltaT = 19, #weeks
+                                   temp_data = pred_grid,
+                                   ests = pref_mod$sd$par.fixed,
+                                   f_mod = pref_mod$preference_model,
+                                   adj = A_big,
+                                   pred_df = pred)$proj_out
+        }
+  assign("ann_proj", rbind(ann_proj,ann_proj_int))
+}
+save(ann_proj,
+     lb_cog,
+     lb_agg, file = here::here("data/agg_harvests_and_projections.rdata"))
+  
+} else {
+  load(here::here("data/agg_harvests_and_projections.rdata"))
+}
+```
+
+### June density predictions from spatiotemporal model
+
+```{r fig.align='center', fig.width = 8, fig.height = 10, dpi = 300, echo=T}
+# visualize projections and harvests-----
+facets <- c(2005:2019, 2021:2023)
+pal <- rev(pals::ocean.deep(100))
+pred_df_sf_4326 <- pred_df_sf %>% st_transform(., crs = 4326)
+plot_list <- lapply(facets, function(facet) {
+  pred_subset <- pred_df_sf_4326 %>% filter(year == facet)
+  ggplot() +
+    geom_sf(data = pred_subset,
+            aes(fill = est),
+            color = "grey70",
+            linewidth = 0.1) +
+    scale_fill_gradientn(colors=as.vector(pal)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet == 2005){
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(angle = 45,
+                                           size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.title.y = element_text(size = 7),
+                axis.title.x = element_text(size = 7,
+                                            vjust = 5),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else {
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(angle = 45,
+                                           size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                axis.title = element_blank(),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    })
+})
+combined_plot_sdm <- wrap_plots(plotlist = plot_list, ncol = 4)
+ggsave(combined_plot_sdm,
+       filename = here::here("figs/summer_sdm_predictions/summer_sdm_predictions.png"),
+       dpi = 300,
+       height = 11,
+       width = 9)
+```
+
+### October density projections
+
+```{r}
+# visualize projections and harvests-----
+facets_subset <- c(2017:2019, 2023)
+pal <- rev(pals::ocean.deep(100))
+ann_proj_4326 <- ann_proj %>% st_transform(., crs = 4326)
+
+#subset of years for combined figure
+plot_list_subset <- lapply(facets_subset, function(facet) {
+  proj_subset <- ann_proj_4326 %>% filter(year == facet)
+  ggplot() +
+    geom_sf(data = proj_subset,
+            aes(fill = projected),
+            color = "grey70",
+            linewidth = 0.1) +
+    scale_fill_gradientn(colors=as.vector(pal)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude",
+         fill = "Density (crab km<sup>-2</sup>)") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet == 2017){
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.text = element_text(angle = 45, size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                axis.title = element_text(size = 9),
+                axis.text = element_text(size = 7),
+                plot.title = element_markdown(size = 10,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else if (!facet %in% c(2017, 2023)) {
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.text = element_text(angle = 45, size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                axis.title = element_blank(),
+                axis.text = element_text(size = 7),
+                plot.title = element_markdown(size = 10,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else if (facet == 2023){
+            theme(legend.position = "bottom",
+            legend.title = element_markdown(size = 9),
+            legend.text = element_text(angle = 45, size = 6),
+            legend.key.height = unit(0.1, "cm"),
+            axis.title = element_blank(),
+            axis.text = element_text(size = 7),
+            plot.title = element_markdown(size = 10,
+                                          hjust = 0.5),
+            panel.grid.major = element_line(linewidth = 0.1,
+                                            color = "grey70"))
+    })
+})
+(combined_plot_subset <- wrap_plots(plotlist = plot_list_subset, ncol = 1))
+ggsave(combined_plot_subset,
+       filename = here::here("figs/projection_overlap_combo/projection_subset.svg"),
+       dpi = 300,
+       height = 12,
+       width = 3)
+
+# all years for supplement
+plot_list <- lapply(facets, function(facet) {
+  proj_subset <- ann_proj_4326 %>% filter(year == facet)
+  ggplot() +
+    geom_sf(data = proj_subset,
+            aes(fill = projected),
+            color = "grey70",
+            linewidth = 0.1) +
+    scale_fill_gradientn(colors=as.vector(pal)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet == 2005){
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(angle = 45,
+                                           size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.title.y = element_text(size = 7),
+                axis.title.x = element_text(size = 7,
+                                            vjust = 5),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else {
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(angle = 45,
+                                           size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                axis.title = element_blank(),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    })
+})
+combined_plot <- wrap_plots(plotlist = plot_list, ncol = 4)
+ggsave(combined_plot,
+       filename = here::here("figs/projection_overlap_combo/projection_all_years.png"),
+       dpi = 300,
+       height = 11,
+       width = 9)
+```
+
+### Fishery CPUE
+
+```{r}
+catch_4326 <- 
+ lb_agg %>% 
+    mutate(catch_pp = ifelse(is.na(catch_pp),
+                             0,
+                             catch_pp)) %>% 
+  st_transform(., crs = 4326)
+catch_pal2 <- rev(pals::ocean.ice(100))
+#subset of years for combined figure
+plot_list_subset <- lapply(facets_subset, function(facet) {
+  catch_subset <- catch_4326 %>% filter(year == facet)
+  ggplot() +
+    geom_sf(data = catch_subset,
+            aes(fill = catch_pp),
+            color = "grey70",
+            linewidth = 0.1)  +
+    scale_fill_gradientn(colors=as.vector(catch_pal2)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude",
+         fill = "Mean CPUE (catch pot<sup>-1</sup>)") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet != 2023){
+            theme(legend.position = "bottom",
+            legend.title = element_blank(),
+            legend.text = element_text(size = 6),
+            legend.key.height = unit(0.1, "cm"),
+            axis.title = element_blank(),
+            axis.text = element_text(size = 7),
+            plot.title = element_markdown(size = 10,
+                                          hjust = 0.5),
+            panel.grid.major = element_line(linewidth = 0.1,
+                                            color = "grey70"))
+    } else if (facet == 2023){
+            theme(legend.position = "bottom",
+            legend.title = element_markdown(size = 9),
+            legend.text = element_text(size = 6),
+            legend.key.height = unit(0.1, "cm"),
+            axis.title = element_blank(),
+            axis.text = element_text(size = 7),
+            plot.title = element_markdown(size = 10,
+                                          hjust = 0.5),
+            panel.grid.major = element_line(linewidth = 0.1,
+                                            color = "grey70"))
+    })
+})
+(catch_plot_subset <- wrap_plots(plotlist = plot_list_subset, ncol = 1))
+ggsave(catch_plot_subset,
+     filename = here::here("figs/projection_overlap_combo/catch_subset.svg"),
+     dpi = 300,
+     width = 3,
+     height = 12)
+
+# all years for supplement
+facet_catch <- c(2005:2020, 2023)
+plot_list <- lapply(facet_catch, function(facet) {
+  catch_subset <- catch_4326 %>% filter(year == facet)
+  ggplot() +
+    geom_sf(data = catch_subset,
+            aes(fill = catch_pp),
+            color = "grey70",
+            linewidth = 0.1)  +
+    scale_fill_gradientn(colors=as.vector(catch_pal2)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet == 2005){
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.title.y = element_text(size = 7),
+                axis.title.x = element_text(size = 7,
+                                            vjust = 5),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else {
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(size = 6),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                axis.title = element_blank(),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    })
+})
+catch_plot <- wrap_plots(plotlist = plot_list, ncol = 4)
+ggsave(catch_plot,
+       filename = here::here("figs/projection_overlap_combo/catch_all_years.png"),
+       dpi = 300,
+       height = 11,
+       width = 9)
+```
+
+### Overlap map
+
+```{r}
+# visualize projections and harvests-----
+pal3 <- pals::ocean.amp(100)
+facets <- c(2017:2019, 2023)
+
+# calculate overlap-----
+overlap_spatial1 <- NULL
+for (y in facet_catch){
+  catch_proj_init <-
+   lb_agg %>% 
+      mutate(catch_pp = ifelse(is.na(catch_pp),
+                               0,
+                               catch_pp)) %>% 
+      filter(year == y) %>% 
+      st_join(
+        st_centroid(ann_proj %>% 
+                    filter(year == y) %>% 
+                    dplyr::select(-year))
+      )
+    assign("overlap_spatial1", rbind(overlap_spatial1, catch_proj_init))
+}
+overlap_spatial <- 
+  overlap_spatial1 %>% 
+    group_by(year) %>% 
+    mutate(p_catch = catch_pp/sum(catch_pp),
+           p_proj = projected/sum(projected),
+           bhat = sqrt(p_catch * p_proj)) %>% 
+    st_transform(., crs = 4326)
+
+# subset figure
+plot_list_subset <- lapply(facets_subset, function(facet) {
+  ovlp_subset <- overlap_spatial %>% filter(year == facet)
+  ovlp_txt <- tibble(x = -160,
+                     y = 57.75,
+                     text = paste0("<i>B</i> = ", round(sum(ovlp_subset$bhat),2)))
+  ggplot() +
+    geom_sf(data = ovlp_subset,
+            aes(fill = bhat),
+            color = "grey70",
+            linewidth = 0.1)  +
+    scale_fill_gradientn(colors=as.vector(pal3)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    geom_richtext(data = ovlp_txt, aes(x = x, y = y, label = text),
+              fill = NA, label.color = NA) +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude",
+         fill = "Disaggregated<br>Bhattacharyya's&emsp;&emsp;") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet != 2023){
+            theme(legend.position = "bottom",
+            legend.title = element_blank(),
+            legend.text = element_text(size = 6),
+            legend.key.height = unit(0.1, "cm"),
+            axis.title = element_blank(),
+            axis.text = element_text(size = 7),
+            plot.title = element_markdown(size = 10,
+                                          hjust = 0.5),
+            panel.grid.major = element_line(linewidth = 0.1,
+                                            color = "grey70"))
+    } else if (facet == 2023){
+            theme(legend.position = "bottom",
+            legend.title = element_markdown(size = 9),
+            legend.text = element_text(size = 6),
+            legend.key.height = unit(0.1, "cm"),
+            axis.title = element_blank(),
+            axis.text = element_text(size = 7),
+            plot.title = element_markdown(size = 10,
+                                          hjust = 0.5),
+            panel.grid.major = element_line(linewidth = 0.1,
+                                            color = "grey70"))
+    })
+})
+(ovlp_plot_subset <- wrap_plots(plotlist = plot_list_subset, ncol = 1))
+ggsave(ovlp_plot_subset,
+     filename = here::here("figs/projection_overlap_combo/overlap_subset.svg"),
+     dpi = 300,
+     width = 3,
+     height = 12)
+
+# all years for the supplement
+plot_list_full <- lapply(facet_catch[facet_catch != 2020], function(facet) {
+  ovlp_subset <- overlap_spatial %>% filter(year == facet)
+  ovlp_txt <- tibble(x = -160,
+                     y = 57.75,
+                     text = paste0("<i>B</i> = ", round(sum(ovlp_subset$bhat),2)))
+  ggplot() +
+    geom_sf(data = ovlp_subset,
+            aes(fill = bhat),
+            color = "grey70",
+            linewidth = 0.1)  +
+    scale_fill_gradientn(colors=as.vector(pal3)) +
+    ggnewscale::new_scale_color() +
+    geom_sf(data = manage_sf,
+          aes(color = name),
+          fill = "transparent",
+          linewidth = 0.5,
+          show.legend = F) +
+    scale_color_manual(values = c("black","red"))+
+    geom_sf(data = ak_land)  +
+    geom_richtext(data = ovlp_txt, aes(x = x, y = y, label = text),
+              fill = NA, label.color = NA) +
+    labs(title = facet,
+         y = "Latitude",
+         x = "Longitude",
+         fill = "Disaggregated<br>Bhattacharyya's&emsp;&emsp;") +
+    theme_fade() +
+    coord_sf(ylim = c(54.6, 58.9),
+             xlim = c(-168, -157.9)) +
+    (if (facet == 2005){
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(size = 6,
+                                           angle = 45),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.title.y = element_text(size = 7),
+                axis.title.x = element_text(size = 7,
+                                            vjust = 5),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    } else {
+          theme(legend.position = "bottom",
+                legend.title = element_blank(),
+                legend.margin      = margin(t = -7, r = 0, b = 0, l = 0, unit = "pt"),
+                legend.text = element_text(size = 6,
+                                           angle = 45),
+                legend.key.height = unit(0.1, "cm"),
+                legend.key.width = unit(0.45, "cm"),
+                axis.text.y = element_text(size = 5),
+                axis.text.x = element_text(size = 5,
+                                         angle = 45),
+                axis.title = element_blank(),
+                plot.title = element_markdown(size = 8,
+                                              hjust = 0.5),
+                panel.grid.major = element_line(linewidth = 0.1,
+                                                color = "grey70"))
+    })
+})
+ovlp_plot_full <- wrap_plots(plotlist = plot_list_full, ncol = 4)
+ggsave(ovlp_plot_full,
+       filename = here::here("figs/projection_overlap_combo/overlap_all_years.png"),
+       dpi = 300,
+       height = 11,
+       width = 9)
+```
+
+# Overlap simulations
+
+```{r}
+if (process){
+  nsim <- 1000 # sims per year
+  source(here::here("R/overlap_sims.R"))
+  save(sim_out_diff_v2,
+       dist_sim_out_v2,
+       ovlp_ts_v2,
+       dist_ts,
+        file = here::here("data/ovlp_sims.rdata"))
+
+} else {
+  load(here::here("data/ovlp_sims.rdata"))
+}
+```
+
+### Overlap hypothesis testing
+
+```{r}
+# calculate catch centroids from non-aggregated CPUE data
+lb_cog <- NULL
+for (y in 2005:2023){
+  
+  if (!y %in% 2021:2022){
+    lb_int <- lb %>% 
+      filter(year == y) %>% 
+      sfc_as_cols(., names = c("lon","lat")) %>% 
+      st_set_geometry(NULL)
+    
+    lb_cog_int <- 
+      tibble(cog_lon_catch = weighted.mean(x = lb_int$lon,
+                                           w = lb_int$catch_pp),
+             cog_lat_catch = weighted.mean(x = lb_int$lat,
+                                           w = lb_int$catch_pp),
+             year = y)
+  } else {
+    lb_cog_int <- 
+      tibble(cog_lon_catch = NA,
+             cog_lat_catch = NA,
+             year = y)
+  }
+
+  
+  assign("lb_cog", rbind(lb_cog_int, lb_cog))
+}
+
+
+sim_out_diff_v2.1 <- sim_out_diff_v2 %>% 
+  filter(!is.na(bhat_proj))
+
+# distances between fishing CPUE centroid and projection centroid using the
+# diffusion-taxis model or...
+sim_dists_proj <- 
+    st_distance(
+    sim_out_diff_v2.1 %>% 
+      left_join(., lb_cog) %>% 
+        st_as_sf(., coords = c("cog_lon","cog_lat")),
+      
+    sim_out_diff_v2.1 %>% 
+      left_join(., lb_cog) %>% 
+        st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
+        by_element = T
+    )
+
+# the diffusion only model
+sim_dists_diff <- 
+    st_distance(
+    sim_out_diff_v2.1 %>% 
+      left_join(., lb_cog) %>% 
+        st_as_sf(., coords = c("cog_lon_diff","cog_lat_diff")),
+      
+    sim_out_diff_v2.1 %>% 
+      left_join(., lb_cog) %>% 
+        st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
+        by_element = T
+    )
+
+
+sim_out_diff_v2.1$sim_dists_proj <- sim_dists_proj
+sim_out_diff_v2.1$sim_dists_diff <- sim_dists_diff
+
+## overlap
+bhat_p <- sim_out_diff_v2.1 %>%
+  mutate(D = bhat_proj - bhat_diff) %>%
+  group_by(year) %>%
+  summarise(
+    p_lower = mean(D <= 0), # one-sided P value
+  )%>%
+  dplyr::select(year, p = p_lower)
+
+## distances to fishing CPUE centroid using diffusion-taxis or diffusion only models
+dist_p <- sim_out_diff_v2.1 %>%
+  mutate(D = sim_dists_proj - sim_dists_diff) %>%
+  group_by(year) %>%
+  summarise(
+    p_upper = mean(D >= 0), # one-sided P value
+  ) %>%
+  dplyr::select(year, p = p_upper) 
+
+# how frequently and to what extent do diffusion-taxis predicted tag movements
+# get closer to actual tag pop-up locations than predicted tag pop-up locations
+# from the diffusion taxis model alone?
+dist_sim_out_v2 %>%
+  dplyr::select(td_distance, diff_distance, year, tag) %>%
+  mutate(distance_difference = td_distance - diff_distance) %>%
+  group_by(year) %>%
+  dplyr::summarise(perc_closer = sum(td_distance < diff_distance)/n(),
+                   avg_dist = mean(distance_difference))
+
+# average distance between predicted and observed for diffusion-taxis and diffusion only
+dist_sim_out_v2 %>%
+  dplyr::select(td_distance, diff_distance, year, tag) %>% 
+  group_by(year) %>% 
+  dplyr::summarise(mean_td_distance = mean(td_distance),
+                   mean_diff_distance = mean(diff_distance))
+
+# average distance among all years and tags
+dist_sim_out_v2 %>%
+  dplyr::select(td_distance, diff_distance, year, tag) %>% 
+  dplyr::summarise(mean_td_distance = mean(td_distance),
+                   mean_diff_distance = mean(diff_distance))
+```
+
+
+### Overlap time series figures
+
+```{r}
+ovlp_plt <-
+  ovlp_ts_v2  %>%
+  left_join(., bhat_p) %>%
+  mutate(sig = ifelse(p < 0.05, "*", NA),
+         p_y = upr95_proj + upr95_proj * 0.1) %>%
+    ggplot() +
+    geom_line(aes(y = mean_proj, x = year,
+                  color = "Diffusion + taxis")) +
+    geom_point(aes(y = mean_proj, x = year,
+                   color = "Diffusion + taxis")) +
+    geom_errorbar(aes(x = year,
+                      ymin = lwr95_proj,
+                      ymax = upr95_proj,
+                      color = "Diffusion + taxis"),
+                  width = 0) +
+    geom_text(aes(y = p_y, x = year, label =sig)) +
+    geom_line(aes(y = mean_diff, x = year, color = "Diffusion only")) +
+    geom_point(aes(y = mean_diff, x = year, color = "Diffusion only")) +
+    geom_errorbar(aes(x = year,
+                      ymin = lwr95_diff,
+                      ymax = upr95_diff,
+                      color = "Diffusion only"),
+                  width = 0) +
+    scale_color_manual(values = c("Diffusion + taxis" = "black",
+                                   "Diffusion only" = "darkorange")) +
+
+    labs(y = "Bhattacharyya's coefficient",
+         x = "Year",
+         color = "Movement model") +
+    theme_fade() +
+    theme(axis.title = element_blank())
+
+
+dist_plt <-
+  sim_out_diff_v2.1 %>%
+  group_by(year) %>%
+  dplyr::summarise(mean_dist_proj = mean(sim_dists_proj),
+                   lwr95_dist_proj = quantile(sim_dists_proj, 0.025),
+                   upr95_dist_proj = quantile(sim_dists_proj, 0.975),
+
+                   mean_dist_diff = mean(sim_dists_diff),
+                   lwr95_dist_diff = quantile(sim_dists_diff, 0.025),
+                   upr95_dist_diff = quantile(sim_dists_diff, 0.975)) %>%
+  add_row(year = c(2020:2022)) %>%
+  left_join(., dist_p) %>%
+  mutate(sig = ifelse(p < 0.05, "*", NA),
+         p_y = upr95_dist_diff + upr95_dist_diff * 0.1) %>%
+  ggplot() +
+  geom_line(aes(y = mean_dist_proj, x = year,
+                color = "Diffusion + taxis")) +
+  geom_point(aes(y = mean_dist_proj, x = year,
+                 color = "Diffusion + taxis")) +
+  geom_errorbar(aes(x = year,
+                    ymin = lwr95_dist_proj,
+                    ymax = upr95_dist_proj,
+                    color = "Diffusion + taxis"),
+                width = 0) +
+  geom_text(aes(y = p_y, x = year, label =sig)) +
+  geom_line(aes(y = mean_dist_diff, x = year, color = "Diffusion only")) +
+  geom_point(aes(y = mean_dist_diff, x = year, color = "Diffusion only")) +
+  geom_errorbar(aes(x = year,
+                    ymin = lwr95_dist_diff,
+                    ymax = upr95_dist_diff,
+                    color = "Diffusion only"),
+                width = 0) +
+
+  labs(y = "Fishing and projected\nCOG distance (km)",
+       x = "Year",
+       color = "Movement model") +
+  scale_color_manual(values = c("Diffusion + taxis" = "black",
+                                "Diffusion only" = "darkorange")) +
+  theme_fade()
+
+
+ovlp_comb_plt <-
+  ovlp_plt +
+    dist_plt +
+    plot_layout(guides = "collect",
+                nrow = 2) +
+    plot_annotation(tag_levels = "a",
+                    tag_prefix = "(",
+                    tag_suffix = ")") &
+    theme(legend.position = "bottom",
+          axis.title = element_text(size = 11))
+ggsave(ovlp_comb_plt,
+       filename = here::here("figs/overlap_time_series/bhat_ovlp_ts.png"),
+       dpi = 300,
+       width = 8,
+       height = 6)
+```
+
+### Latitude/longitudes of projected vs. fishery centroids
+
+```{r}
+# transform all coordinates to decimal degrees from AEA
+ovlp_ts_v2.1 <- 
+  ovlp_ts_v2 %>%
+  filter(!is.na(mean_cog_lon)) %>% 
+  add_row(year = 2020) %>% 
+  left_join(.,
+            lb_cog %>% 
+              filter(!year %in% c(2021, 2022))) %>% 
+  dplyr::select(year, mean_cog_lat:cog_lat_catch)
+
+col_names <- 
+  list(c("mean_cog_lon","mean_cog_lat"),
+     c("upr95_cog_lon", "upr95_cog_lat"),
+     c("lwr95_cog_lon", "lwr95_cog_lat"),
+     c("mean_cog_lon_diff","mean_cog_lat_diff"),
+     c("upr95_cog_lon_diff", "upr95_cog_lat_diff"),
+     c("lwr95_cog_lon_diff", "lwr95_cog_lat_diff"),
+     c("cog_lon_catch", "cog_lat_catch"))
+ovlp_ts_v2.2 <- NULL
+for (n in 1:length(col_names)){
+  init <-
+    ovlp_ts_v2.1 %>% 
+    dplyr::select(all_of(col_names[[n]]), year) %>% 
+    filter(complete.cases(.)) %>% 
+    st_as_sf(., coords = col_names[[n]], crs = ak_crs) %>% 
+    st_transform(., crs = 4326) %>% 
+    sfc_as_cols(., names = c("lon","lat")) %>%
+    mutate(var = str_remove(col_names[[n]][1], "_lon")) %>% 
+    st_set_geometry(NULL)
+    
+  assign("ovlp_ts_v2.2", rbind(ovlp_ts_v2.2, init))
+}
+
+ovlp_ts_v2.3 <- 
+  ovlp_ts_v2.2 %>% 
+  pivot_wider(., names_from = c("var"), values_from = c("lon","lat"))
+
+# latitude components----
+lat_plt <-
+  ovlp_ts_v2.3 %>% 
+    ggplot() +
+    geom_line(aes(y = lat_mean_cog, x = year,
+                  color = "DTM-based projections")) +
+    geom_point(aes(y = lat_mean_cog, x = year,
+                   color = "DTM-based projections")) +
+    geom_errorbar(aes(x = year,
+                      ymin = lat_lwr95_cog,
+                      ymax = lat_upr95_cog,
+                      color = "DTM-based projections"),
+                  width = 0) +
+
+    geom_line(aes(y = lat_cog_catch, x = year,
+                  color = "Fishery CPUE")) +
+    geom_point(aes(y = lat_cog_catch, x = year,
+                   color = "Fishery CPUE")) +
+    geom_hline(aes(yintercept = 57), color = "gray", linetype = 2) +
+    geom_hline(aes(yintercept = 56), color = "gray", linetype = 2) +
+  scale_color_manual(values = c("DTM-based projections" = "black",
+                                "Fishery CPUE" = "purple")) +
+  labs(y = "Centroid latitude (°)",
+       x = "Year") +
+  theme_fade() +
+  theme(legend.title = element_blank())
+
+lon_plt <-
+  ovlp_ts_v2.3 %>% 
+    ggplot() +
+    geom_line(aes(y = lon_mean_cog, x = year,
+                  color = "DTM-based projections")) +
+    geom_point(aes(y = lon_mean_cog, x = year,
+                   color = "DTM-based projections")) +
+    geom_errorbar(aes(x = year,
+                      ymin = lon_lwr95_cog,
+                      ymax = lon_upr95_cog,
+                      color = "DTM-based projections"),
+                  width = 0) +
+
+    geom_line(aes(y = lon_cog_catch, x = year,
+                  color = "Fishery CPUE")) +
+    geom_point(aes(y = lon_cog_catch, x = year,
+                   color = "Fishery CPUE")) +
+    geom_hline(aes(yintercept = -164), color = "gray", linetype = 2) +
+    geom_hline(aes(yintercept = -162), color = "gray", linetype = 2) +
+  scale_color_manual(values = c("DTM-based projections" = "black",
+                                "Fishery CPUE" = "purple")) +
+  labs(y = "Centroid longitude (°)",
+       x = "Year") +
+  theme_fade() +
+  theme(legend.title = element_blank())
+
+# longitude relationship R^2
+r2_lab <- tibble(r2 = paste0("R<sup>2</sup> = ",
+                             round(summary(lm(lon_cog_catch ~ lon_mean_cog, 
+                                              data = ovlp_ts_v2.3))$r.squared, 2)),
+       y = -162,
+       x = -163.6)
+
+# Test for latitude relationship----
+# summary(lm(lat_cog_catch ~ lat_mean_cog,
+# data = ovlp_ts_v2.3))
+
+east_cog_compare <-
+  ovlp_ts_v2.3 %>% 
+  filter(complete.cases(.)) %>% 
+    ggplot() +
+    geom_smooth(aes(y = lon_cog_catch, x = lon_mean_cog),
+                method = "lm",
+                color  = "black",
+                alpha = 0.25) +
+    geom_richtext(data = r2_lab, aes(y = y, x = x, label = r2),
+                  fill = NA, label.color = NA) +
+    geom_point(aes(y = lon_cog_catch, x = lon_mean_cog)) + 
+    labs(y = "Centroid longitude (fishery, °)",
+         x = "Centroid longitude (DTM-projection, °)") +
+    scale_x_continuous(expand = c(0.025, 0.025))+
+    theme_fade()
+
+north_cog_compare <-
+  ovlp_ts_v2.3 %>% 
+  filter(complete.cases(.)) %>% 
+    ggplot() +
+    geom_point(aes(y = lat_cog_catch, x = lat_mean_cog)) +
+    labs(y = "Centroid latitude (fishery, °)",
+         x = "Centroid latitude (DTM-projection, °)") +
+    theme_fade()
+
+lon_lat_plts <-
+  (((lon_plt + lat_plt) +
+
+    plot_layout(guides = "collect", ncol = 1) &
+    theme(legend.position = "bottom")) |
+
+  (east_cog_compare + north_cog_compare +
+
+     plot_layout(ncol = 1))) +
+  plot_annotation(tag_levels = list(c("a","c","b","d"),
+                                    c("b","d")),
+                  tag_prefix = "(",
+                  tag_suffix = ")")
+ggsave(lon_lat_plts,
+       filename = here::here("figs/centroid_positions/lon_lat_plts.png"),
+       dpi = 300,
+       width = 8.5,
+       height = 7)
+
+
+# ggplot(lb) +
+#   geom_sf(data = ak_land) + geom_sf() +
+#   facet_wrap(~year) + coord_sf(xlim = c(-850, -250), ylim = c(600, 1000), datum = ak_crs)
+
+```
+
+### Temperature effects on overlap
+
+```{r}
+# calculate mean and sd October temperatures within the prediction grid and bind
+# to centroid components
+temp_combined <-
+  agg_temp_interannual_sum_aut %>%
+    filter(month == 10) %>%
+    st_intersection(ebs) %>% #prediction grid
+    st_set_geometry(NULL) %>% 
+    group_by(year) %>%
+    dplyr::summarise(t_m = mean(temp, na.rm = T),
+                     t_sd = sd(temp, na.rm = T)) %>%
+    left_join(ovlp_ts_v2.3) %>% 
+    left_join(.,
+              ovlp_ts_v2 %>%
+                filter(!is.na(mean_cog_lon)) %>% 
+                add_row(year = 2020) %>% 
+                mutate(b_diff = mean_proj - mean_diff) %>%
+                dplyr::select(year, b_diff))
+
+temp_june <-
+  agg_temp_interannual_sum_aut %>%
+    filter(month == 6) %>%
+    st_intersection(ebs) %>% #prediction grid
+    st_set_geometry(NULL) %>% 
+    group_by(year) %>%
+    dplyr::summarise(t_m = mean(temp, na.rm = T),
+                     t_sd = sd(temp, na.rm = T))
+
+# Model b_diff ~ s(temp)----
+summary(gam(b_diff ~ s(t_m, k = 3), data = temp_combined))
+
+b_diff_plt <-
+  ggplot(temp_combined) +
+    geom_hline(aes(yintercept = 0), linetype = 2, alpha = 0.25) +
+    geom_point(aes(y = b_diff, x = t_m)) +
+    geom_text_repel(aes(y = b_diff, x = t_m, label = year)) +
+    geom_smooth(aes(y = b_diff, x = t_m), method = "gam", color = "black",
+                formula = y ~ s(x, k = 3)) +
+    labs(x = "Bottom temp. (°C)",
+         y = "Spatial overlap skill<br>improvement (<i>B</i><sub>DTM</sub> - <i>B</i><sub>diff. only</sub>)") +
+    scale_x_continuous(expand = c(0.01, 0.01)) +
+    theme_fade() +
+    theme(axis.title.y = element_markdown())
+b_diff_plt
+ggsave(b_diff_plt,
+       filename = here::here("figs/temp_effect_on_overlap/temp_effect_overlap.png"),
+       dpi = 300,
+       width = 5,
+       height = 4)
+
+
+```
+
+### Temperature effects on centroid positions
+
+```{r}
+map_temp_plt <-
+  # projected density centroids
+  ggplot(temp_combined)+
+    geom_sf(data = manage_sf,
+            aes(color = name),
+            fill = "transparent",
+            linewidth = 0.25,
+            show.legend = F) +
+    scale_color_manual(values = c("black","red")) +
+    geom_sf(data = ak_land)  +
+    ggnewscale::new_scale_color() +
+    geom_errorbar(aes(xmin = lon_upr95_cog,
+                    xmax = lon_lwr95_cog,
+                    x = lon_mean_cog,
+                    y = lat_mean_cog),
+                color = "gray",
+                width = 0) +
+      geom_errorbar(aes(ymin = lat_upr95_cog,
+                    ymax = lat_lwr95_cog,
+                    x = lon_mean_cog,
+                    y = lat_mean_cog),
+                color = "gray",
+                width = 0) +
+    geom_point(aes(y = lat_mean_cog, x = lon_mean_cog, color = t_m), size = 4) +
+    scale_color_gradient2(midpoint = 6.5,
+                          low = scales::muted("blue"),
+                            high = scales::muted("red")) +
+    labs(y = "Latitude",
+         x = "Longitude",
+         color = "Bottom temp. (°C)") +
+    coord_sf(xlim  = c(-164.85, -161.75),
+             ylim = c(55.75, 57.75)) +
+    theme_fade() +
+    annotation_north_arrow(which_north = "true",
+                           style = north_arrow_minimal(),
+                           location = "tr",
+                           pad_y = unit(1, "mm"),
+                           pad_x = unit(-1, "mm")) +
+    theme(legend.key.height = unit(0.4, "cm"),
+          legend.title = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          axis.text = element_text(size = 9)) +
+  
+  #fishery CPUE centroids
+  ggplot(temp_combined)+
+    geom_sf(data = manage_sf,
+            aes(color = name),
+            fill = "transparent",
+            linewidth = 0.25,
+            show.legend = F) +
+    scale_color_manual(values = c("black","red")) +
+    geom_sf(data = ak_land)  +
+    ggnewscale::new_scale_color() +
+    geom_point(aes(y = lat_cog_catch, x = lon_cog_catch, color = t_m), size = 4) +
+    scale_color_gradient2(midpoint = 6.5,
+                          low = scales::muted("blue"),
+                            high = scales::muted("red")) +
+    labs(y = "Latitude",
+         x = "Longitude",
+         color = "Bottom temp. (°C)") +
+    coord_sf(xlim  = c(-164.75, -161.75),
+             ylim = c(55.75, 57.65)) +
+    theme_fade() +
+    annotation_north_arrow(which_north = "true",
+                           style = north_arrow_minimal(),
+                           location = "tr",
+                           pad_y = unit(1, "mm"),
+                           pad_x = unit(-1, "mm")) +
+    theme(legend.key.height = unit(0.4, "cm"),
+          legend.title = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          axis.text = element_text(size = 9))  +
+    plot_layout(guides = "collect") +
+    plot_annotation(tag_levels = "a",
+                    tag_prefix = "(",
+                    tag_suffix = ")") &
+    theme(legend.position = "bottom")
+map_temp_plt
+ggsave(map_temp_plt,
+       filename = here::here("figs/temp_effect_on_overlap/temp_effect_centroid_map.png"),
+       width = 10,
+       height = 6,
+       dpi = 300)
+```
+

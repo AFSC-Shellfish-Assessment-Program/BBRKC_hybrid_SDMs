@@ -1,95 +1,63 @@
-# internal function to generate the instantaneous movement rate matrix (M_dot)
-make_M <- function(A_ss,      # Adjacency matrix
-                   At_zz,     # indices of non-zero elements of adjacency matrix (indexed from 1)
-                   rate_par,  # diffusion parameter
-                   pref_g,    # habitat preference vector
-                   move_comps,# c("diffusion", "taxis) or "diffusion"
-                   d_scaling, # Choose scale discretization method from "none", "scale1", or "scale2.
-                              # "scale3" is default and ensures Metzler matrix
-                              # (see chapter 10 in https://github.com/spacetime-ecologist/Edition_1
-                              # and in the RTMB implementation https://github.com/spacetime-ecologist/spacetime-ecologists-RTMB)
-                   DeltaD,    # length of grid cell size (in km)
-                   colsumA_g  # adjacency matrix column sums
-                   ) {
-  M <- AD(Matrix(0, nrow(A_ss), ncol(A_ss)))
+#' Fits diffusion-taxis model to tagging data.
+#'
+#' @param formula Model formula for the habitat preference function that should be
+#' specified without an intercept. This formula is used in the basis expansion step
+#' performed by `mgcv` internally and so will accept `mgcv` spline notation. For
+#' example, both `~ 0 + s(x, k = 3) + te(y,z, k = 4)` and `~0 + x + y + z` would be valid.
+#' Note that no penalty on basis function coefficients is applied in this version of
+#' the model. To fit a diffusion-only model, set `formula = NULL` (default) and `move_comps = "diffusion"`.
+#' @param data Data frame specifying environmental variables at the time of tag release (pop-up).
+#' Used in basis expansion and so should include all variables specified in habitat
+#' preference function. Should also include a time variable and environmental variables
+#' at all locations should be specified for each of these time steps.
+#' @param time Name of time variable in `data` used to group tags released within the same time
+#' windows (e.g. `"year"`). Should be specified even if all tags were released during one time window.
+#' @param gridded_domain `sfc`-class variable where rows are polygons specifying
+#' the study region.
+#' @param cellsize Numeric length of one side of the polygons within `gridded_doman`.
+#' @param deployment_locs Integer vector specifying the indices of `gridded_domain` where
+#' tags were deployed.
+#' @param release_locs Integer vector specifying the indices of `gridded_domain` where
+#' tags released from animals aka "popped-up".
+#' @param tags_per_step Numeric vector specifying the number of tags deployed during each time window specified by `time`.
+#' @param move_comps Defaults to `"diffusion"` for fitting a diffusion-only model when `formula = NULL`. To
+#' also model taxis, set `move_comps = c("diffusion", "taxis")` while ensuring that `formula != NULL` and `data != NULL`.data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAAB4ElEQVR4Xu2Wy07CUBRF/RlniB2B3+DYRE0UJsYv0Zm/IF+hxDglMZo4IwYpT4G2vJGnLQ6uXTVtQmO4LWHgoCfZI+5e+9xH6NnZ+U+lKMnduJJIx+KJq/h+8mYTOV6bAcvP/7P2lOTh0cn57d39g5rPv1nFYklsIrwwYMH056wU3R2fpjO2yVTVsiiVflUuV0LJ9cGABXPtzjmabPZRxVSpVEW1WhO1Wt1Rvf4RSO56vDBgwYTtz/OKeykU3i1MQBqNpmg2W6LV0mzpAaU5HrwwYNnMZUw5uPbnecWjoFtMQHS9Ldrtruh0eqLb7QcSa/HghQELJmx/nlf8yEJNMxxzrzcQg8FIDIefYjQaBxJr8eCFAQumNJguMfT7Qwc0Hk/FZDIT0+k8kFiLBy8MWDClwRwR3WIEMpstxHz+JRYLM5BYiwcvDFgwpcF0yFHRNQBgprkMJTx4YcCCKQ3mcXBPdEz3gCzrO5Tw4IUBC6Y0mJfJEXFf7m79YJncXcOABTMKXqkoOAoOqtDBfBbt/1Vr28G6bkg+i/bHOpd7UrcdDHPtIMB4kkpdZgyjY27rLxMWzLWjD8Vgdpa6yDy/vLJzy911GOHBCwOWdNhzyxtv7XvhUWwixxtmvI0qqm3VDymRabH1tbGXAAAAAElFTkSuQmCC
+#' @param d_scaling Spatial scale discretization method. Accepts `"none"` or `"scale"`.
+#'
+#' @return A list with the following components:
+#' \itemize{
+#'   \item `opt` - `nlminb` output.
+#'   \item `obj` - TMB model object created by `RTMB::MakeADFun`.
+#'   \item `AIC` - AIC for fitted model.
+#'   \item `model_matrix` - The design matrix derived from the `mgcv` basis expansion.
+#'   \item `A` - Adjacency matrix derived from `gridded_domain`.
+#'   \item `formula` - Habitat preference model formula.
+#'   \item `preference_model` - Habitat preference model output from basis expansion. Used in prediction.
+#'   \item `sd` - Estimates and standard errors for parameters from `RTMB`.
+#' }
+#'
+#' @export
+#'
 
-  # no scale discretization applied
-  if (d_scaling == "none"){
-    if (all(c("diffusion", "taxis") %in% move_comps)) {
-      d_pref <- (pref_g[At_zz[,2]] - pref_g[At_zz[,1]])
-      M[At_zz] <- M[At_zz] + exp(rate_par + d_pref)
-    } else if (identical(move_comps, "diffusion")) {
-      M[At_zz] <- M[At_zz] + exp(rate_par)
-    } else {
-      stop("Unsupported move_comps")
-    }
-
-  } else if (d_scaling == "scale1"){
-    D <- exp(rate_par)
-    if (all(c("diffusion", "taxis") %in% move_comps)) {
-
-      M[At_zz] <- M[At_zz] + (D / colsumA_g[ At_zz[, 1] ] / DeltaD^2) +
-        (pref_g[At_zz[, 2]] - pref_g[At_zz[, 1]]) / DeltaD
-
-    } else if (identical(move_comps, "diffusion")) {
-
-      M[At_zz] <- M[At_zz] + (D / colsumA_g[ At_zz[, 1] ] / DeltaD^2)
-
-    } else {
-      stop("Unsupported move_comps")
-    }
-
-  # default, ensures Metzler matrix
-  } else if (identical(d_scaling, "scale2")) {
-    D <- exp(rate_par)
-    if (all(c("diffusion","taxis") %in% move_comps)) {
-
-      M[At_zz] <- M[At_zz] +
-        D / DeltaD^2 * exp((pref_g[At_zz[, 2]] - pref_g[At_zz[, 1]]) / DeltaD)
-
-    } else if (identical(move_comps, "diffusion")) {
-      M[At_zz] <- M[At_zz] + D / (DeltaD^2)
-    } else stop("Unsupported move_comps")
-  } else {
-    stop("Unknown d_scaling")
-  }
-
-  row_sums <- M %*% matrix(1, nrow(M), 1)
-  diag(M)  <- -row_sums[,1]
-  M
-}
-
-mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat preference model
-               data = out_interannual,              # environmental data with column for y = 0
-               gridded_domain = grid2,              # gridded domain (class sfc)
-               deployment_locs = grid0,             # grid indices for tag deployments
-               release_locs = grid1,                # grid indices for tag pop-up
-               time = "year",                       # time index for groups of deployed tags
-               tags_per_step = c(13, 13, 37),       # how many tags per time step?
-               move_comps = c("diffusion", "taxis"),# set diffusion and taxis arguments
-               rtmb_exp = FALSE,                    # experimental - do matrix exponentiation in RMTB or using Matrix::expm (latter is default)
-               cellsize = 25,                       # length in km of grid cell
-               d_scaling = "scale2",                # scale discretization method
-               apply_cov_scaling = FALSE,           # standardize covariates within years?
-               DeltaT = rep(19, 3)){                # within-year tag deployment duration (defaults to 19 weeks)
-
-  # checks
-  stopifnot(
-    "Time variable not found." = time %in% names(data),
-    "deployment_locs must equal release_locs" =
-      length(deployment_locs) == length(release_locs),
-    "length(tags_per_step) must equal number of time steps" =
-      length(unique(data[[time]])) == length(tags_per_step)
-  )
+mm <- function(formula = NULL,
+               data = NULL,
+               gridded_domain,
+               deployment_locs,
+               release_locs,
+               time,
+               tags_per_step,
+               move_comps = "diffusion",
+               cellsize,
+               d_scaling = "scale",
+               apply_cov_scaling = FALSE){
 
   # create adjacency matrix
   st_rook <- function(m, ...) sf::st_relate(m, m, pattern="F***1****", ... )
   grid_A <- st_rook(gridded_domain, sparse = TRUE)
-  A <- as(grid_A,"sparseMatrix") |> as("TsparseMatrix")
+  A <- methods::as(grid_A, "sparseMatrix") |> methods::as("TsparseMatrix")
 
   # indices of non-zero elements of adjacency matrix
   At_zz = cbind( attr(A,"i"), attr(A,"j") ) + 1
-  colsumA_g <- colSums(A)
 
   # Number of tags
   n_tags <- length(deployment_locs)
@@ -99,19 +67,33 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
   n_t <- length(times)
   n_s <- nrow(A)
 
+  if (!is.null(formula) & identical(move_comps, "diffusion")){
+    stop("Habitat preference formula provided for diffusion-only model")
+  }
+
+  if (is.null(formula) & all(c("diffusion","taxis") %in% move_comps)){
+    stop("No formula provided for habitat preference model while taxis is selected.")
+  }
+
+  if (!is.null(formula) & all(c("diffusion","taxis") %in% move_comps) & is.null(data)){
+    stop("No gridded environmental data provided to model habitat preference.")
+  }
+
   # spline basis expansion---
   if (!is.null(formula)){
     f_mod <- mgcv::gam(formula = as.formula(paste(c("y", as.character(formula)), collapse=" ")),
-                       data = data)
+    data = data)
     X_sz <- mgcv::predict.gam(f_mod, newdata = data, type = "lpmatrix")
-    if (apply_cov_scaling){
+
+    if (apply_cov_scaling){ # scale and center covariates if you want to
       basis_ind_split <- split(seq_len(nrow(X_sz)),
                                rep(seq_len(n_t), each = n_s))
       for (ti in seq_along(basis_ind_split)){
         rows <- basis_ind_split[[ti]]
-        X_sz[rows, ] <- scale(X_sz[rows, , drop = FALSE])
+        X_sz[rows, ] <- apply(X = X_sz[rows, ], MARGIN = 2, scale)
       }
     }
+
   } else { # for diffusion-only case
     f_mod <- NULL
     X_sz <- NULL
@@ -128,11 +110,8 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
     "n_s" = n_s,                # n grid cells within year
     "n_t" = n_t,                # n time steps
     "move_comps" = move_comps,  # selected movement components to model
-    "rtmb_exp" = rtmb_exp,      # do matrix exponentiation in rtmb or Matrix
-    "DeltaD" = cellsize,        # length of grid cell side
-    "d_scaling" = d_scaling,    # scale discretization
-    "colsumA_g" = colsumA_g,    # adjacency matrix column sums (needed for d_scaling == "scale1")
-    "DeltaT" = DeltaT           # within-year tag deployment duration
+    "delta_d" = cellsize,        # length of grid cell side
+    "d_scaling" = d_scaling    # scale discretization
   )
 
   if (identical(move_comps, "diffusion")) {
@@ -148,7 +127,7 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
 
   # calculate joint negative log likelihood for RTMB
   f <- function(par_list) {
-    getAll(dat, par_list, warn = FALSE)
+    RTMB::getAll(dat, par_list, warn = FALSE)
     jnll <- 0
 
     # ensures the basis expansion is indexed properly (by time variable)
@@ -168,15 +147,13 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
       }
 
       # calculates M_dot
-      Mrate_gg <- make_M(A_ss,
-                         At_zz,
-                         rate_par = ln_D,
-                         pref_g = h_s,
-                         move_comps,
-                         d_scaling,
-                         DeltaD,
-                         colsumA_g)
-      tau <- DeltaT[ti] # within year time step for M = exp(DeltaT * Mrate_gg)
+      Mrate_gg <- M_dot(A_ss,
+                        At_zz,
+                        rate_par = ln_D,
+                        pref_g = h_s,
+                        move_comps,
+                        d_scaling,
+                        delta_d)
 
       # extract deployment and release grid indices
       if (ti == 1){
@@ -188,27 +165,20 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
       }
 
       # initial deployment locations
-      v <- matrix(0, nrow = n_s, ncol = length(dep_loc))
-      v[cbind(dep_loc, seq_along(dep_loc))] <- 1
+      V <- matrix(0, nrow = n_s, ncol = length(dep_loc))
+      V[cbind(dep_loc, seq_along(dep_loc))] <- 1
 
-      # select likelihood calcluation via RTMB::expAv or t(Matrix::expm(Mrate_gg)) %*% v
-      if (rtmb_exp){
-        M <- expAv(A = tau * Mrate_gg, v = v, transpose = TRUE,
-                   Nmax = 10000, tol=.Machine$double.eps,
-                   uniformization = TRUE)
-        lik <- M[cbind(rel_loc, seq_along(rel_loc))]
-        jnll <- jnll - sum(log(lik + 1e-25))
-      } else {
-        M   <- t(Matrix::expm(tau * Mrate_gg)) %*% v
-        lik <- M[cbind(rel_loc, seq_along(rel_loc))]
-        jnll <- jnll - sum(log(lik))
-      }
+      M <- Matrix::expm(t(Mrate_gg)) %*% V
+      lik <- M[cbind(rel_loc, seq_along(rel_loc))]
+      jnll <- jnll - sum(log(lik))
     }
     jnll
   }
-
-  obj <- MakeADFun(f, data = dat, par = par_list, silent = TRUE)
-  opt <- nlminb(obj$par, obj$fn, obj$gr)
+  obj <- RTMB::MakeADFun(f, data = dat, par = par_list, silent = FALSE)
+  opt <- nlminb(  start = obj$par,
+                  objective = obj$fn,
+                  gradient = obj$gr,
+                  control = list( trace = 1))
   AIC <- 2 * opt$objective + 2 * length(opt$par)
 
   list(opt = opt,
@@ -218,6 +188,64 @@ mm <- function(formula  = ~ 0 + depth + temp,       # formula for habitat prefer
        A = A,
        formula = formula,
        preference_model = f_mod,
-       sd = tryCatch(sdreport(obj),
+       sd = tryCatch(RTMB::sdreport(obj),
                      error = function(e) e))
 }
+
+
+#' Internal function to generate the instantaneous movement rate matrix (M_dot).
+#' Inputs are constructed internally to mm(). Largely copied from the RTMB version
+#' of Spatio-temporal models for ecologists by Thorson and Kristensen 2024. Translated to
+#' RTMB by Chris Cahill https://github.com/spacetime-ecologist/spacetime-ecologists-RTMB
+#'
+#' @keywords internal
+#' @param A_ss Adjacency matrix of `gridded_domain`.
+#' @param At_zz Indices of non-zero elements of adjacency matrix (indexed from 1).
+#' @param rate_par Diffusion parameter.
+#' @param pref_g Habitat preference vector.
+#' @param move_comps `c("diffusion", "taxis")` or `"diffusion"`.
+#' @param d_scaling Spatial scale discretization method.
+#' @param delta_d `cellsize` parameter.
+#' @param colsumA_g Column sums of adjacency matrix.
+
+
+M_dot <- function(A_ss,
+                  At_zz,
+                  rate_par,
+                  pref_g,
+                  move_comps,
+                  d_scaling,
+                  delta_d) {
+  Mrate_gg <- RTMB::AD(Matrix::Matrix(0, nrow(A_ss), ncol(A_ss)))
+  ones <- matrix(1, ncol = 1, nrow = nrow(A_ss))
+
+  # no scale discretization applied
+  if (d_scaling == "none"){
+    if (all(c("diffusion", "taxis") %in% move_comps)) {
+      d_pref <- (pref_g[At_zz[,2]] - pref_g[At_zz[,1]])
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par + d_pref)
+    } else if (identical(move_comps, "diffusion")) {
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par)
+    } else {
+      stop("Unsupported move_comps")
+    }
+
+    # default, ensures Metzler matrix
+  } else if (identical(d_scaling, "scale")) {
+    D <- exp(rate_par)
+    if (all(c("diffusion","taxis") %in% move_comps)) {
+
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] +
+        D / delta_d^2 * exp((pref_g[At_zz[, 2]] - pref_g[At_zz[, 1]]) / delta_d)
+
+    } else if (identical(move_comps, "diffusion")) {
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + D / (delta_d^2)
+    } else stop("Unsupported move_comps")
+  } else {
+    stop("Unknown d_scaling")
+  }
+  row_sums <- Mrate_gg %*% ones # rowSums()
+  diag(Mrate_gg) <- diag(Mrate_gg) - as.vector(row_sums)
+  Mrate_gg
+}
+

@@ -6,11 +6,12 @@ library(Matrix)
 library(mgcv)
 library(sdmTMB)
 library(RTMB)
+library(splines2)
 
 # Load data, source movement model----
 
 ## CRS----
-ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
+ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units= km +no_defs"
 
 ## boundary and grid data----
 load(here::here("data/spatial_layers.rdata"))
@@ -50,7 +51,8 @@ env_cov_full <- agg_temp_interannual_sum_aut %>%
             st_centroid(.)) %>%
   st_join(., agg_tc %>%
             st_centroid(.)) %>%
-  filter(!is.na(depth) & !is.na(temp) & !is.na(phi) & !is.na(tidal_curr)) %>%
+  filter(!is.na(depth) & !is.na(temp) & !is.na(tidal_curr) & !is.na(phi)) %>%
+  st_transform(., crs = ak_crs) %>%
   st_intersection(., ebs_abridged)
 
 env_cov <- env_cov_full %>% filter(year %in% 2021:2023,
@@ -121,21 +123,22 @@ male_crab_movement <-
     m2023 %>%
       dplyr::select(tag, deploy_t, rel_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year))
+                    year)
+  )
 
-## deployment locations-----
+# deployment locations-----
 sf_s0 = st_as_sf(male_crab_movement[,c('deploy_lon','deploy_lat','year')],
                  coords = c('deploy_lon','deploy_lat'),
                  crs = ak_crs)
 s0 <- st_coordinates(sf_s0)
 
-## pop-up locations-----
+# pop-up locations-----
 sf_s1 <- st_as_sf(male_crab_movement[,c('lon0','lat0','year')],
                   coords = c('lon0','lat0'),
                   crs = ak_crs)
 s1 <- st_coordinates(sf_s1)
 
-## deployment location grid cells----
+# deployment location grid cells----
 grid0 <- c(unlist(st_intersects( sf_s0 %>%
                                    filter(year == 2021),
                                  env_cov %>%
@@ -151,7 +154,8 @@ grid0 <- c(unlist(st_intersects( sf_s0 %>%
                                  env_cov %>%
                                    filter(year == 2023,
                                           month == 10))))
-## pop-up location grid cells----
+
+# pop-up location grid cells----
 grid1 <- c(unlist(st_intersects( sf_s1 %>%
                                    filter(year == 2021),
                                  env_cov %>%
@@ -168,7 +172,7 @@ grid1 <- c(unlist(st_intersects( sf_s1 %>%
                                    filter(year == 2023,
                                           month == 10))))
 
-## environmental data for fitting the model----
+# join spatial data to fit model
 out_interannual <-
   env_cov %>%
   filter(month == 10) %>%
@@ -187,6 +191,9 @@ grid2 <-
   filter(year == 2023) %>%
   st_as_sfc()
 
+# cell size
+cs <- 25
+
 # Model fitting-----
 m1.t <-
   mm(formula  = ~ 0 + tidal_curr + temp + depth,
@@ -197,11 +204,8 @@ m1.t <-
      time = "year",
      tags_per_step = c(13, 13, 37),
      move_comps = c("diffusion", "taxis"),
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3)) # 19 weeks by three years
+     cellsize = cs,
+     d_scaling = "none")
 
 m1.t$sd
 m1.t$opt$message
@@ -215,11 +219,8 @@ m2.t <-
      time = "year",
      tags_per_step = c(13, 13, 37),
      move_comps = c("diffusion", "taxis"),
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3))
+     cellsize = cs,
+     d_scaling = "none")
 
 m2.t$sd
 m2.t$opt$message
@@ -233,11 +234,8 @@ m3.t <-
      time = "year",
      tags_per_step = c(13, 13, 37),
      move_comps = c("diffusion", "taxis"),
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3))
+     cellsize = cs,
+     d_scaling = "none")
 
 m3.t$sd
 m3.t$opt$message
@@ -249,13 +247,10 @@ m4.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37),
+     tags_per_step = c(13, 13, 37, 36),
      move_comps = c("diffusion", "taxis"),
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3))
+     cellsize = cs,
+     d_scaling = "none")
 
 m4.t$sd
 m4.t$opt$message
@@ -267,13 +262,10 @@ m5.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37),
+     tags_per_step = c(13, 13, 37, 36),
      move_comps = c("diffusion", "taxis"),
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3))
+     cellsize = cs,
+     d_scaling = "none")
 
 m5.t$sd
 m5.t$opt$message
@@ -286,13 +278,10 @@ m6.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37),
+     tags_per_step = c(13, 13, 37, 36),
      move_comps = "diffusion",
-     rtmb_exp = FALSE,
-     cellsize = 25,
-     d_scaling = "scale2",
-     apply_cov_scaling = FALSE,
-     DeltaT = rep(19, 3))
+     cellsize = cs,
+     d_scaling = "none")
 
 m6.t$sd
 m6.t$opt$message

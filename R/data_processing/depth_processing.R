@@ -22,7 +22,7 @@ sf_depth <-
   mutate(depth = ifelse(depth < 0, NA, depth))
 
 ## aggregate depth to grid----
-agg_depth <- aggregate(sf_depth, by = big_grid, FUN = mean, na.rm = T) %>%
+agg_depth <- aggregate(sf_depth, by = big_grid, FUN = mean, na.rm = FALSE) %>%
   st_difference(., ak_land)
 
 save(agg_depth,

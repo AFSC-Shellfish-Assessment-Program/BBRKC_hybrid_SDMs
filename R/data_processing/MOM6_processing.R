@@ -128,7 +128,7 @@ for (i in years){
       dplyr::rename(temp = 1) %>%
       st_transform(ak_crs)
 
-    agg_temp <- aggregate(sf_temp, by = big_grid, FUN = mean, na.rm = TRUE) %>%
+    agg_temp <- aggregate(sf_temp, by = big_grid, FUN = mean, na.rm = FALSE) %>%
       st_difference(., ak_land) %>%
       mutate(year = i,
              month = m)

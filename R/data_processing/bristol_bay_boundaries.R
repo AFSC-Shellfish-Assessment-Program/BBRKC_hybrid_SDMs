@@ -5,6 +5,8 @@ library(sf)
 library(lubridate)
 library(tsibble)
 
+cellsize <- 25
+
 ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
 
 # Extend the BB management area to include those crab tagged just to the north of boundary
@@ -25,11 +27,11 @@ merged_boundaries <- bb_mng_sf %>%
             dplyr::select(geometry)) %>%
   st_union()
 big_grid <- st_make_grid(merged_boundaries,
-                     cellsize = c(25,25)) %>%
+                     cellsize = c(cellsize,cellsize)) %>%
   st_intersection(., merged_boundaries)
 
 mid_grid <- st_make_grid(ebs,
-                         cellsize = c(25,25)) %>%
+                         cellsize = c(cellsize,cellsize)) %>%
   st_intersection(., ebs)
 
 # Land polygon

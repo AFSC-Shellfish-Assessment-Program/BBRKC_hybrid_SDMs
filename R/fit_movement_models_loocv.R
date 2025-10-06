@@ -31,8 +31,7 @@ load(here::here("data/agg_tc.rdata"))
 source(here::here("R/mm.R"))
 
 # helper functions
-source(here::here("R/sfc_as_cols.R"))
-source(here::here("R/theme_fade.R"))
+source(here::here("R/helpers.R"))
 
 # Data processing----
 
@@ -191,6 +190,8 @@ grid2 <-
 # load fitted models to get habitat preference formulas
 load(here::here("data/fitted_movement_models.rdata"))
 
+cs <- 25
+
 # function to do LOOCV------
 mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
                      data = out_interannual,
@@ -198,17 +199,16 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
                      deployment_locs = grid0,
                      release_locs = grid1,
                      time = "year",
-                     DeltaT = rep(19, 3),
                      move_comps = c("diffusion", "taxis"),
                      apply_cov_scaling = FALSE,
-                     d_scaling = "scale2",
-                     cellsize = 25,
-                     rtmb_exp = FALSE){
+                     d_scaling = "none",
+                     cellsize = cs){
 
   gridded_domain_df <- gridded_domain %>%
     st_as_sf() %>%
     st_centroid() %>%
     dream::sfc_as_cols(., names = c("lon","lat"))
+
   pred_out <- NULL
   for (i in seq_along(deployment_locs)){
     message(i)
@@ -235,11 +235,9 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
          time,
          tags_per_step,
          move_comps,
-         rtmb_exp,
          cellsize,
          d_scaling,
-         apply_cov_scaling,
-         DeltaT)
+         apply_cov_scaling)
 
     if (any(is.na(mt_loo$sd$par.fixed)) |
         any(is.na(mt_loo$sd$cov.fixed))){
@@ -251,31 +249,32 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
       X_gk <- predict(mt_loo$preference_model,
                       newdata = out_interannual %>% filter(year == yr),
                       type = "lpmatrix")
-
       beta_k <- mt_loo$opt$par[names(mt_loo$opt$par) != "ln_D"]
-      tau    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
-
-      pref_g <- X_gk %*% beta_k
+      ln_D    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
+      h_s <- X_gk %*% beta_k
     } else if (identical(move_comps, "diffusion")) {
-      tau    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
+      ln_D    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
       pref_g <- NULL
     }
 
-    A <- mt_loo$A
+    A_ss <- mt_loo$A
     At_zz = cbind( attr(A,"i"), attr(A,"j") ) + 1
-    Mrate_gg <- make_M(A_ss = A,
+    Mrate_gg <- M_dot(A_ss,
                       At_zz,
-                      rate_par = tau,
-                      pref_g,
+                      rate_par = ln_D,
+                      pref_g = h_s,
                       move_comps,
                       d_scaling,
-                      DeltaD = cellsize,
-                      colsumA_g = colSums(A))
+                      delta_d = cellsize)
+
+    v_ig <- matrix(0, nrow=length(grid0), ncol=ncol(A))
+    v_ig[cbind(seq_along(grid0), grid0)] = 1
+    f_ig <- v_ig %*% t(M)
 
     v <- matrix(0, nrow = nrow(A), ncol = 1)
-    v[grid0[i], 1] <- 1
+    v[grid0[i], 1] <- 1 # starting position for left out tag
 
-    end_dist <- as.vector(t(Matrix::expm(DeltaT * Mrate_gg)) %*% v)
+    end_dist <- as.vector(t(Matrix::expm(Mrate_gg)) %*% v)
     # gridded_domain %>%
     #   st_as_sf() %>%
     #   mutate(end_dist) %>%

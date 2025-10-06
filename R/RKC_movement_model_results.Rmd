@@ -26,6 +26,8 @@ library(concaveman)
 library(ggtext)
 library(ggrepel)
 library(ggspatial)
+library(overlapping)
+library(lwgeom)
 
 ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
 
@@ -66,9 +68,6 @@ source(here::here("R/mm.R"))
 
 ## projection function----
 source(here::here("R/project_distribution.R"))
-
-## marginal effects function
-source(here::here("R/effectDT.R"))
 
 # helper functions
 source(here::here("R/helpers.R"))
@@ -443,28 +442,17 @@ distance_traveled %>%
   dplyr::summarise(m_dist = mean(dist),
                    sd_dist = sd(dist))
 
-# movement directions
-compute_bearing <- function(start_easting, start_northing, end_easting, end_northing) {
-  dx <- end_easting - start_easting
-  dy <- end_northing - start_northing
-  
-  # angle in radians
-  angle_rad <- atan2(dx, dy)
-  
-  # convert angle to degrees
-  angle_deg <- angle_rad * (180 / pi)
-  
-  # adjust angle to compass bearing (0 to 360 degrees)
-  bearing <- (angle_deg + 360) %% 360
-  
-  return(bearing)
+# calculate bearing from start and end locations
+bear_out <- NULL
+for (i in unique(sf_s0_locs$tag)){
+  start <- sf_s0_locs %>% filter(tag == i) %>% st_transform(., crs = 4326)
+  end <- sf_s1_locs %>% filter(tag == i)  %>% st_transform(., crs = 4326)
+  bear_int <- as.numeric(st_geod_azimuth(bind_rows(start, end))  * (180/pi))
+  assign("bear_out", rbind(bear_out, tibble(bearing = ((bear_int %% 360) + 360) %% 360, #0-360
+                                            tag = i)))
 }
 
-# bearing for crab movement (all tags)
-oos_obs_movement$bearing <- compute_bearing(start_easting = oos_obs_movement$deploy_lon,
-                              start_northing = oos_obs_movement$deploy_lat,
-                              end_easting = oos_obs_movement$lon0,
-                              end_northing = oos_obs_movement$lat0)
+oos_obs_movement2 <- oos_obs_movement %>% left_join(., bear_out, by = "tag")
 
 summ_stat_circ <- function(x, stat = "mean"){
   cdat <- 
@@ -481,29 +469,40 @@ summ_stat_circ <- function(x, stat = "mean"){
   }
   return(out)
 }
-summ_stat_circ(oos_obs_movement$bearing,
+summ_stat_circ(oos_obs_movement2$bearing,
                stat = "mean")
-summ_stat_circ(oos_obs_movement$bearing,
+# 217.0039
+summ_stat_circ(oos_obs_movement2$bearing,
                stat = "sd")
+# 37.78055
 
 # bearing for crab released in closure areas
-oos_obs_movement %>% 
+oos_obs_movement2 %>% 
   filter(tag %in% init$tag) %>% 
   dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
                    sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+#  m_bearing sd_bearing
+#       <dbl>      <dbl>
+# 1      233.       36.1
 
 # bearing for crab not released in closure areas
-oos_obs_movement %>% 
+oos_obs_movement2 %>% 
   filter(!tag %in% init$tag) %>% 
   dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
                    sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+#   m_bearing sd_bearing
+#       <dbl>      <dbl>
+# 1      202.       32.8
 
 # bearing for crab released west of -164
-oos_obs_movement %>% 
+oos_obs_movement2 %>% 
   filter(tag %in% west_tags) %>% 
   dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
                    sd_bearing = summ_stat_circ(bearing, stat = "sd"))
-
+# # A tibble: 1 × 2
+#   m_bearing sd_bearing
+#       <dbl>      <dbl>
+# 1      214.       36.2
 
 # movement comparisons (t test and watson williams test)------
 
@@ -517,7 +516,7 @@ t.test(dist ~ east_west, data = dist_comp_df)
 
 ## bearing----
 dir_comp_df <- 
-  oos_obs_movement  %>% 
+  oos_obs_movement2  %>% 
   mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")))
 
 west_bear <- circular(dir_comp_df %>% filter(east_west == "west") %>% pull(bearing),
@@ -542,55 +541,19 @@ watson.williams.test(angles, grp)
 ## Marginal habitat preference smooths
 
 ```{r, fig.width = 9, fig.height=5}
+## marginal effects wrapper for marginaleffects package (adapted from Thorson and Kristensen 2024)
+source(here::here("R/effectDT.R"))
 
-# data for prediction grid
-min_depth <- env_cov_full_df %>%
-  pull(depth) %>% 
-  min()
+fit <- list(obj = pref_mod$obj,
+            opt = pref_mod$opt,
+            sd = pref_mod$sd,
+            data = env_cov_full_df,
+            formula = as.formula(paste0("y ~ ",pref_mod$formula)[2]),
+            parhat = pref_mod$obj$env$parList(),
+            X_sz = pref_mod$model_matrix,
+            pref_mod = pref_mod$preference_model)
 
-max_depth <- env_cov_full_df %>% 
-  pull(depth) %>%
-  max()
-
-min_tc <- env_cov_full_df %>% 
-  pull(tidal_curr) %>% 
-  min()
-
-max_tc <- env_cov_full_df %>%
-  pull(tidal_curr) %>% 
-  max()
-
-mean_temp <- env_cov_full_df %>%
-  filter(year %in% c(2021:2023)) %>% 
-  pull(temp) %>% 
-  mean()
-
-# prediction grid where temperature is held at the mean (for 2D pref. figure)
-pref_surf <- 
-  tibble(tidal_curr = seq(min_tc, max_tc, length.out = 50)) %>% 
-  expand_grid(depth = seq(min_depth, max_depth, length.out = 50)) %>% 
-  mutate(temp = mean_temp) 
-
-# Extract model components
-Xpred <- predict(f_mod1, newdata = pref_surf, type = "lpmatrix")
-ests <- pref_mod$sd$par.fixed
-ests <- ests[names(ests) != "ln_D"]
-cov_mat <- pref_mod$sd$cov.fixed
-cov_mat <- cov_mat[-which(rownames(cov_mat) == "ln_D"), -which(colnames(cov_mat) == "ln_D")]
-
-# centered preference predictions in space
-pref_surf$preference <- as.numeric(scale(Xpred %*% ests, center = T, scale = F))
-
-# extract range of tidal currents and depths where preference is high
-pref_surf %>% 
-  filter(preference > quantile(pref_surf$preference)[4]) %>% 
-  pull(tidal_curr) %>% 
-  range()
-
-pref_surf %>% 
-  filter(preference > quantile(pref_surf$preference)[4]) %>% 
-  pull(depth) %>% 
-  range()
+class(fit) = "custom_tmb"
 
 # pull out a year of data to constrain the prediction grid to combinations
 # of depth and tidal current that are actually observed. Doesn't matter which
@@ -600,71 +563,92 @@ env_cov_full_df_2021 <- env_cov_full_df %>%
   dplyr::select(tidal_curr, depth) %>% 
   distinct()
 
-# constrain the prediction grid for visualizing
-pref_surf_constrained <- pref_surf %>%
-    rowwise() %>%
-    mutate(
-        ok = any(
-            (abs(tidal_curr - env_cov_full_df_2021$tidal_curr) <= 
-               env_cov_full_df_2021$tidal_curr * 0.1) &
-                (abs(depth      - env_cov_full_df_2021$depth     ) <= 
-                   abs(env_cov_full_df_2021$depth) * 0.1)
-        ),
-        preference = if_else(ok, preference, NA_real_)
-    ) %>%
-    ungroup() %>%
-    dplyr::select(-ok) %>% 
-  filter(depth >  22.5)
+df_grid <- env_cov_full %>% filter(year %in% 2021:2023, month == 10)
 
+# Get prediction for partial dependence plots
+new_temp = datagrid( newdata=data.frame(df_grid)[,c('depth','temp','tidal_curr')],
+                     temp = quant,
+                     depth = mean,
+                     tidal_curr = mean) %>%
+  mutate(y = 0)
 
-# marginal smooth effect of bottom temperature on preference
-temp_effect <- 
-  effectDT(model = pref_mod,
-           df = env_cov_full_df %>% filter(year %in% 2021:2023),
-            terms = "temp") 
+pred_temp = predictions( fit,
+                         newdata=new_temp,
+                         center=TRUE,
+                         param="beta_k")
+
+new_int = datagrid( newdata=data.frame(df_grid)[,c('depth','temp','tidal_curr')],
+                     temp = mean,
+                     depth = quant,
+                     tidal_curr = quant) %>%
+  mutate(y = 0)
+
+pred_int = predictions( fit,
+                         newdata=new_int,
+                         center=TRUE,
+                         param="beta_k")
+
+pref_df <- 
+  pred_int %>% 
+  as.data.frame() %>% 
+  mutate(tidal_curr2 = round(tidal_curr),
+         depth2 = round(depth))
+
+obs_bubs <- 
+  df_grid %>% 
+    st_set_geometry(NULL) %>% 
+    st_as_sf(., coords = c("tidal_curr", "depth")) %>% 
+    concaveman(., concavity = 3) %>% 
+    st_buffer(., dist = 2.5)
+
+pred_int2 <- 
+  pred_int %>% 
+    as.data.frame() %>% 
+    st_as_sf(., coords = c("tidal_curr", "depth")) %>% 
+    st_intersection(., obs_bubs) %>% 
+    sfc_as_cols(., names = c("tidal_curr", "depth")) %>% 
+    st_set_geometry(NULL)
+
 
 # visualize marginal effect smooths
 temp_smooth_plt <-
-  ggplot(temp_effect) + 
-  geom_rug(data = combined_env,
-           aes(x = temp, color = state), 
-           sides = "b", alpha = 0.6) +
-  geom_ribbon(aes(ymax = pref_upr, ymin = pref_lwr, x = x), alpha = 0.2) +
-  geom_line(aes(y = pref, x = x)) + 
-  labs(y = "Habitat preference",
-       x = "Bottom Temp. (°C)",
-       color = "") +
-  scale_color_manual(values = c("Deployment (June)" = "black",
-                                "Pop-up (October)" = "purple")) +
-    theme_fade() +
-    theme(axis.title.x = element_markdown(size = 12),
-          axis.title.y = element_markdown(size = 12))
-
-# 2D marginal smooth of depth-tidal current interaction
-fill_lims <- range(pref_surf_constrained$preference)
-depth_tc_effect_plt <- 
-  ggplot(pref_surf_constrained,aes(y = depth, 
-                     x = tidal_curr)) +
-  geom_raster(aes(fill = preference), show.legend = T) + 
-  geom_contour(aes(z = preference), color = "black") + 
-  geom_point(data = combined_env,
-           aes(y = depth, x = tidal_curr, color = state), size = 2) +
+  ggplot(pred_temp) + 
+    geom_rug(data = combined_env,
+             aes(x = temp, color = state), 
+             sides = "b", alpha = 0.6) +
+    geom_ribbon(aes(ymax = conf.high, ymin = conf.low, x = temp), alpha = 0.2) +
+    geom_line(aes(y = estimate, x = temp)) + 
+    labs(y = "Habitat preference",
+         x = "Bottom Temp. (°C)",
+         color = "") +
     scale_color_manual(values = c("Deployment (June)" = "black",
-                                "Pop-up (October)" = "purple")) +
-  theme_fade() +
-  scale_fill_gradientn(
-    limits = fill_lims,
-    colors = pals::viridis(100),
-    name = "Habitat preference"
-  )  +
-  labs(y = "Depth (m)",
-       x = "Maximum tidal current (cm s<sup>-1</sup>)",
-       color = "") +
-  scale_x_continuous(expand = c(0.01, 0.01)) +
-  scale_y_continuous(expand = c(0.01, 0.01)) +
+                                  "Pop-up (October)" = "purple")) +
+      theme_fade() +
+      theme(axis.title.x = element_markdown(size = 12),
+            axis.title.y = element_markdown(size = 12))
+
+depth_tc_effect_plt <- 
+  ggplot(data = pred_int2,
+         aes(y = depth, x = tidal_curr)) +
+    geom_raster(aes(fill = estimate), show.legend = T) +
+    geom_contour(aes(z = estimate), color = "black") +
+      geom_point(data = combined_env,
+             aes(y = depth, x = tidal_curr, color = state), size = 2) +
+      scale_color_manual(values = c("Deployment (June)" = "black",
+                                  "Pop-up (October)" = "purple")) +
+    theme_fade() +
+    scale_fill_gradientn(
+      colors = pals::viridis(100),
+      name = "Habitat preference"
+    )  +
+    labs(y = "Depth (m)",
+         x = "Maximum tidal current (cm s<sup>-1</sup>)",
+         color = "") +
+    scale_x_continuous(expand = c(0.01, 0.01)) +
+    scale_y_continuous(expand = c(0.01, 0.01)) +
     theme(axis.title.x = element_markdown(size = 12),
           axis.title.y = element_markdown(size = 12),
-          legend.background = element_rect(fill = "transparent"), 
+          legend.background = element_rect(fill = "transparent"),
           legend.key = element_rect(fill = "transparent",
                                     color = "transparent"))
 
@@ -677,21 +661,6 @@ ggsave(marg_prefs, file = here::here("figs/marginal_preference_smooths/marginal_
        width = 9,
        height = 3.5,
        dpi = 300)
-
-# parsing the interaction effect a bit more
-pref_surf_constrained %>% 
-  filter(tidal_curr > median(env_cov_full_df$tidal_curr, na.rm = T),
-         preference > quantile(pref_surf_constrained$preference, na.rm = T,
-                               0.90)) %>% 
-  pull(depth) %>% 
-  range()
-
-pref_surf_constrained %>% 
-  filter(tidal_curr < median(env_cov_full_df$tidal_curr, na.rm = T),
-         preference > quantile(pref_surf_constrained$preference, na.rm = T,
-                               0.90)) %>% 
-  pull(depth) %>% 
-  range()
 ```
 
 # Visualize Bristol Bay habitat preferences
@@ -1438,9 +1407,8 @@ if (process){
   nsim <- 1000 # sims per year
   source(here::here("R/overlap_sims.R"))
   save(sim_out_diff_v2,
-       dist_sim_out_v2,
+       dist_comps,
        ovlp_ts_v2,
-       dist_ts,
         file = here::here("data/ovlp_sims.rdata"))
 
 } else {
@@ -1478,20 +1446,20 @@ for (y in 2005:2023){
   assign("lb_cog", rbind(lb_cog_int, lb_cog))
 }
 
-
-sim_out_diff_v2.1 <- sim_out_diff_v2 %>% 
-  filter(!is.na(bhat_proj))
+distances <- 
+  dist_comps %>% 
+    left_join(., lb_cog) %>% 
+    filter(!is.na(cog_lon_catch) &
+             !is.na(cog_lon))
 
 # distances between fishing CPUE centroid and projection centroid using the
 # diffusion-taxis model or...
 sim_dists_proj <- 
     st_distance(
-    sim_out_diff_v2.1 %>% 
-      left_join(., lb_cog) %>% 
+      distances %>% 
         st_as_sf(., coords = c("cog_lon","cog_lat")),
       
-    sim_out_diff_v2.1 %>% 
-      left_join(., lb_cog) %>% 
+      distances %>% 
         st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
         by_element = T
     )
@@ -1499,60 +1467,49 @@ sim_dists_proj <-
 # the diffusion only model
 sim_dists_diff <- 
     st_distance(
-    sim_out_diff_v2.1 %>% 
-      left_join(., lb_cog) %>% 
+      distances %>% 
         st_as_sf(., coords = c("cog_lon_diff","cog_lat_diff")),
       
-    sim_out_diff_v2.1 %>% 
-      left_join(., lb_cog) %>% 
+      distances %>% 
         st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
         by_element = T
     )
 
+distances$sim_dists_proj <- sim_dists_proj
+distances$sim_dists_diff <- sim_dists_diff
 
-sim_out_diff_v2.1$sim_dists_proj <- sim_dists_proj
-sim_out_diff_v2.1$sim_dists_diff <- sim_dists_diff
+bhat_eta <- NULL
+for (i in c(2005:2019, 2023)) {
+  bhat_proj <- dist_comps %>% filter(year == i) %>% pull(bhat_proj)
+  bhat_diff <- dist_comps %>% filter(year == i) %>% pull(bhat_diff)
 
-## overlap
-bhat_p <- sim_out_diff_v2.1 %>%
-  mutate(D = bhat_proj - bhat_diff) %>%
-  group_by(year) %>%
-  summarise(
-    p_lower = mean(D <= 0), # one-sided P value
-  )%>%
-  dplyr::select(year, p = p_lower)
+  # Put data into a list
+  data_list <- list(bhat_proj = bhat_proj, bhat_diff = bhat_diff)
 
-## distances to fishing CPUE centroid using diffusion-taxis or diffusion only models
-dist_p <- sim_out_diff_v2.1 %>%
-  mutate(D = sim_dists_proj - sim_dists_diff) %>%
-  group_by(year) %>%
-  summarise(
-    p_upper = mean(D >= 0), # one-sided P value
-  ) %>%
-  dplyr::select(year, p = p_upper) 
+  # Estimate overlapping area (type = "2" for proportion)
+  overlap_results <- overlap(data_list, type = "2", plot = FALSE)
+  print(final.plot(data_list) +
+    labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
+  assign("bhat_eta", rbind(bhat_eta, tibble(year = i,
+                                            bhat_eta = overlap_results$OV)))
+}
 
-# how frequently and to what extent do diffusion-taxis predicted tag movements
-# get closer to actual tag pop-up locations than predicted tag pop-up locations
-# from the diffusion taxis model alone?
-dist_sim_out_v2 %>%
-  dplyr::select(td_distance, diff_distance, year, tag) %>%
-  mutate(distance_difference = td_distance - diff_distance) %>%
-  group_by(year) %>%
-  dplyr::summarise(perc_closer = sum(td_distance < diff_distance)/n(),
-                   avg_dist = mean(distance_difference))
+dist_eta <- NULL
+for (i in c(2005:2019, 2023)) {
+  dist_proj <- distances %>% filter(year == i) %>% pull(sim_dists_proj)
+  dist_diff <- distances %>% filter(year == i) %>% pull(sim_dists_diff)
 
-# average distance between predicted and observed for diffusion-taxis and diffusion only
-dist_sim_out_v2 %>%
-  dplyr::select(td_distance, diff_distance, year, tag) %>% 
-  group_by(year) %>% 
-  dplyr::summarise(mean_td_distance = mean(td_distance),
-                   mean_diff_distance = mean(diff_distance))
+  # Put data into a list
+  data_list <- list(dist_proj = dist_proj, dist_diff = dist_diff)
 
-# average distance among all years and tags
-dist_sim_out_v2 %>%
-  dplyr::select(td_distance, diff_distance, year, tag) %>% 
-  dplyr::summarise(mean_td_distance = mean(td_distance),
-                   mean_diff_distance = mean(diff_distance))
+  # Estimate overlapping area (type = "2" for proportion)
+  overlap_results <- overlap(data_list, type = "2", plot = FALSE)
+  print(final.plot(data_list) +
+    labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
+  assign("dist_eta", rbind(dist_eta, tibble(year = i,
+                                            dist_eta = overlap_results$OV)))
+}
+
 ```
 
 
@@ -1560,9 +1517,9 @@ dist_sim_out_v2 %>%
 
 ```{r}
 ovlp_plt <-
-  ovlp_ts_v2  %>%
-  left_join(., bhat_p) %>%
-  mutate(sig = ifelse(p < 0.05, "*", NA),
+  ovlp_ts_v2 %>%
+  left_join(., bhat_eta) %>%
+  mutate(sig = ifelse(bhat_eta <= 0.05, "*", NA),
          p_y = upr95_proj + upr95_proj * 0.1) %>%
     ggplot() +
     geom_line(aes(y = mean_proj, x = year,
@@ -1593,7 +1550,7 @@ ovlp_plt <-
 
 
 dist_plt <-
-  sim_out_diff_v2.1 %>%
+  distances %>%
   group_by(year) %>%
   dplyr::summarise(mean_dist_proj = mean(sim_dists_proj),
                    lwr95_dist_proj = quantile(sim_dists_proj, 0.025),
@@ -1603,8 +1560,8 @@ dist_plt <-
                    lwr95_dist_diff = quantile(sim_dists_diff, 0.025),
                    upr95_dist_diff = quantile(sim_dists_diff, 0.975)) %>%
   add_row(year = c(2020:2022)) %>%
-  left_join(., dist_p) %>%
-  mutate(sig = ifelse(p < 0.05, "*", NA),
+  left_join(., dist_eta) %>%
+  mutate(sig = ifelse(dist_eta <= 0.05, "*", NA),
          p_y = upr95_dist_diff + upr95_dist_diff * 0.1) %>%
   ggplot() +
   geom_line(aes(y = mean_dist_proj, x = year,

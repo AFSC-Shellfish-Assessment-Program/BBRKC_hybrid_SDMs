@@ -1,57 +1,39 @@
-effectDT <- function(model = m6,
-                     terms = c("depth","temp"),
-                     df = out_interannual){
-  pref_mod <- model$preference_model
-  cov_names <- names(pref_mod$model)
-  term_var <- cov_names[cov_names %in% terms & !cov_names %in% "y"]
+# Change marginaleffects options to define `custom_tmb` class
+options("marginaleffects_model_classes" = "custom_tmb")
+quant = function(x) seq(min(x),max(x),length=100)
 
-  # drop diffusion parameter from estimates and covariance matrix
-  ests <- model$sd$par.fixed
-  ests <- ests[names(ests) != "ln_D"]
-  cov_mat <- model$sd$cov.fixed
-  cov_mat <- cov_mat[-which(rownames(cov_mat) == "ln_D"), -which(colnames(cov_mat) == "ln_D")]
-  X_gk <- model$model_matrix
-
-  out <- NULL
-  for (i in term_var){
-    hold_var <- cov_names[!cov_names %in% c(i, "y")]
-
-    term_min <-
-      df %>%
-      dplyr::select(all_of(i)) %>%
-      dplyr::summarise_all(min)  %>%
-      pull(.)
-
-    term_max <-
-      df %>%
-      dplyr::select(all_of(i)) %>%
-      dplyr::summarise_all(max)  %>%
-      pull(.)
-
-    term_seq <- seq(term_min, term_max, length.out = 100)
-
-    hold_var_mean <-
-      df %>%
-      dplyr::select(all_of(hold_var)) %>%
-      dplyr::summarise_all(mean)
-
-    pred_df <- tibble(term_seq,
-                      hold_var_mean)
-    names(pred_df)[1] <- i
-    Xpred <- predict(pref_mod, newdata = pred_df, type = "lpmatrix")
-
-    marginal_effects <-
-      tibble(pref = as.numeric(scale(Xpred %*% ests,
-                                     center = T, scale = F)),
-             pref_se = as.numeric(sqrt(diag(Xpred %*% cov_mat %*% t(Xpred)))),
-             pref_lwr = pref - 1.96 * pref_se,
-             pref_upr = pref + 1.96 * pref_se,
-             term = i) %>%
-      bind_cols(., pred_df %>%
-                  dplyr::select(x = 1))
-
-    assign("out", rbind(out, marginal_effects))
-  }
-
+# Function to get coefficients for TMB model
+get_coef.custom_tmb = function(model, param, ...){
+  out = model$parhat[[param]]
+  names(out) = rep(param, length(out))
   return(out)
 }
+
+# Function to get variance-covariance for TMB model
+get_vcov.custom_tmb = function(model, param, ...){
+  rows = which( names(model$opt$par) == param )
+  array( model$sd$cov.fixed[rows,rows],
+         dim = rep(length(rows),2),
+         dimnames = list(rep(param,length(rows)),rep(param,length(rows))) )
+}
+
+# get_vcov(model = fit, param = "beta_k")
+
+# Function to change coefficients for TMB model
+set_coef.custom_tmb = function(model, newpar, param, ...){
+  model$parhat[[param]] <- newpar
+  return(model)
+}
+
+# set_coef(model = fit, newpar = rep(0, 11), param = "beta_k")
+
+# Function to get predictions when changing coefficients
+get_predict.custom_tmb = function(model, newdata, param, center=FALSE, ...){
+  Xpred <- predict(model$pref_mod, newdata = newdata, type = "lpmatrix")
+  beta_k = get_coef.custom_tmb(model, param)
+  yhat_i = Xpred %*% beta_k
+  if(center==TRUE) yhat_i = yhat_i - mean(yhat_i)
+  out = data.frame( rowid=seq_along(yhat_i[,1]), estimate=yhat_i )
+  return(out)
+}
+

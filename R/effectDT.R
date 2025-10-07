@@ -1,3 +1,5 @@
+# Adapted from Thorson and Kristensen 2024
+
 # Change marginaleffects options to define `custom_tmb` class
 options("marginaleffects_model_classes" = "custom_tmb")
 quant = function(x) seq(min(x),max(x),length=100)

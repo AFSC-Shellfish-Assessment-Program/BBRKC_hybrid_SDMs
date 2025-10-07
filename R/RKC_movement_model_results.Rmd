@@ -27,6 +27,7 @@ library(ggtext)
 library(ggrepel)
 library(ggspatial)
 library(overlapping)
+library(marginaleffects)
 library(lwgeom)
 
 ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
@@ -623,7 +624,7 @@ temp_smooth_plt <-
          color = "") +
     scale_color_manual(values = c("Deployment (June)" = "black",
                                   "Pop-up (October)" = "purple")) +
-      theme_fade() +
+      theme_minimal() +
       theme(axis.title.x = element_markdown(size = 12),
             axis.title.y = element_markdown(size = 12))
 
@@ -661,6 +662,21 @@ ggsave(marg_prefs, file = here::here("figs/marginal_preference_smooths/marginal_
        width = 9,
        height = 3.5,
        dpi = 300)
+
+# parsing the interaction effect a bit more
+pred_int2 %>% 
+  filter(tidal_curr > median(env_cov_full_df$tidal_curr, na.rm = T),
+         estimate > quantile(pred_int2$estimate, na.rm = T,
+                               0.90)) %>% 
+  pull(depth) %>% 
+  range()
+
+pred_int2 %>% 
+  filter(tidal_curr < median(env_cov_full_df$tidal_curr, na.rm = T),
+         estimate > quantile(pred_int2$estimate, na.rm = T,
+                               0.90)) %>% 
+  pull(depth) %>% 
+  range()
 ```
 
 # Visualize Bristol Bay habitat preferences
@@ -676,9 +692,15 @@ len_out <- env_cov_full_df %>%
 
 # redo basis expansion to predict over prettier area
 # predict habitat preference over Bristol Bay by year
-pred_g <- tibble(pred_g =
-                   X_gk_pred %*% ests,
+pred_g <- tibble(pred_g = X_gk_pred %*% ests[2:12],
                  year = rep(2021:2023, each = len_out))
+
+
+# centered preference predictions in space
+pref_surf <- 
+  env_cov_full_df %>% 
+      filter(year %in% 2021:2023) %>% 
+  mutate(preference = as.numeric(scale(X_gk_pred %*% ests[2:12], center = T, scale = F)))
 
 # extract preference percentiles for visualizing
 spat_pref <- env_cov_full %>% 
@@ -873,7 +895,6 @@ for (y in 2005:2023){
       ann_proj_int <- project_distribution(
                                    year = y,
                                    month = 10,
-                                   DeltaT = 19, #weeks
                                    temp_data = pred_grid,
                                    ests = pref_mod$sd$par.fixed,
                                    f_mod = pref_mod$preference_model,
@@ -1404,7 +1425,7 @@ ggsave(ovlp_plot_full,
 
 ```{r}
 if (process){
-  nsim <- 1000 # sims per year
+  nsim <- 1000# sims per year
   source(here::here("R/overlap_sims.R"))
   save(sim_out_diff_v2,
        dist_comps,

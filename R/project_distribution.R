@@ -7,10 +7,8 @@ project_distribution <- function(year = 2005,
                                  adj = A_big,
                                  pred_df = pred,
                                  dep_locs = grid0,
-                                 crop = ebs,
-                                 diffusion_only = F,
                                  move_comps = c("diffusion", "taxis"),
-                                 DeltaT = 19){
+                                 cellsize = 25){
 
   # filter environmental data
   env_cov <- temp_data %>%
@@ -22,7 +20,7 @@ project_distribution <- function(year = 2005,
     env_cov %>%
     st_as_sfc()
 
-  # convert to data.frame for prediction----
+  # convert to data.frame for prediction
   out <- env_cov %>%
     st_set_geometry(NULL) %>%
     mutate(y = 0,
@@ -30,24 +28,23 @@ project_distribution <- function(year = 2005,
 
   ## Extract estimated parameters from preference function
   beta_k <- ests[names(ests) != "ln_D"]
-  diff_par <- ests[names(ests) == "ln_D"]
+  ln_D <- ests[names(ests) == "ln_D"]
 
-  ## model matrix------
+  ## model matrix
   X_gk_n <- predict(f_mod, newdata = out, type = "lpmatrix")
   At_zz = cbind( attr(adj,"i"), attr(adj,"j") ) + 1
 
-  pref_g <- X_gk_n %*% beta_k
-  Mrate <- make_M(  A_ss = adj,
-                    At_zz,
-                    rate_par = diff_par,
-                    pref_g,
-                    move_comps,
-                    d_scaling = "scale2",
-                    DeltaD = 25,
-                    colsumA_g = colSums(adj))
-  M <- expm::expm(DeltaT * Mrate, do.sparseMsg = F)
+  h_s <- X_gk_n %*% beta_k
+  Mrate <-  M_dot(A_ss = adj,
+                  At_zz,
+                  rate_par = ln_D,
+                  pref_g = h_s,
+                  move_comps,
+                  d_scaling = "none",
+                  delta_d = cellsize)
+  M <- expm::expm(Mrate, do.sparseMsg = F)
 
-  ## do the projection into october-----
+  ## do the projection into october
   pred_sel <- pred_df %>%
     filter(year == !!year)
 

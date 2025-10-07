@@ -21,7 +21,7 @@
 #' tags released from animals aka "popped-up".
 #' @param tags_per_step Numeric vector specifying the number of tags deployed during each time window specified by `time`.
 #' @param move_comps Defaults to `"diffusion"` for fitting a diffusion-only model when `formula = NULL`. To
-#' also model taxis, set `move_comps = c("diffusion", "taxis")` while ensuring that `formula != NULL` and `data != NULL`.data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAAB4ElEQVR4Xu2Wy07CUBRF/RlniB2B3+DYRE0UJsYv0Zm/IF+hxDglMZo4IwYpT4G2vJGnLQ6uXTVtQmO4LWHgoCfZI+5e+9xH6NnZ+U+lKMnduJJIx+KJq/h+8mYTOV6bAcvP/7P2lOTh0cn57d39g5rPv1nFYklsIrwwYMH056wU3R2fpjO2yVTVsiiVflUuV0LJ9cGABXPtzjmabPZRxVSpVEW1WhO1Wt1Rvf4RSO56vDBgwYTtz/OKeykU3i1MQBqNpmg2W6LV0mzpAaU5HrwwYNnMZUw5uPbnecWjoFtMQHS9Ldrtruh0eqLb7QcSa/HghQELJmx/nlf8yEJNMxxzrzcQg8FIDIefYjQaBxJr8eCFAQumNJguMfT7Qwc0Hk/FZDIT0+k8kFiLBy8MWDClwRwR3WIEMpstxHz+JRYLM5BYiwcvDFgwpcF0yFHRNQBgprkMJTx4YcCCKQ3mcXBPdEz3gCzrO5Tw4IUBC6Y0mJfJEXFf7m79YJncXcOABTMKXqkoOAoOqtDBfBbt/1Vr28G6bkg+i/bHOpd7UrcdDHPtIMB4kkpdZgyjY27rLxMWzLWjD8Vgdpa6yDy/vLJzy911GOHBCwOWdNhzyxtv7XvhUWwixxtmvI0qqm3VDymRabH1tbGXAAAAAElFTkSuQmCC
+#' also model taxis, set `move_comps = c("diffusion", "taxis")` while ensuring that `formula != NULL` and `data != NULL`.
 #' @param d_scaling Spatial scale discretization method. Accepts `"none"` or `"scale"`.
 #'
 #' @return A list with the following components:
@@ -48,8 +48,7 @@ mm <- function(formula = NULL,
                tags_per_step,
                move_comps = "diffusion",
                cellsize,
-               d_scaling = "scale",
-               apply_cov_scaling = FALSE){
+               d_scaling = "scale"){
 
   # create adjacency matrix
   st_rook <- function(m, ...) sf::st_relate(m, m, pattern="F***1****", ... )
@@ -84,16 +83,6 @@ mm <- function(formula = NULL,
     f_mod <- mgcv::gam(formula = as.formula(paste(c("y", as.character(formula)), collapse=" ")),
     data = data)
     X_sz <- mgcv::predict.gam(f_mod, newdata = data, type = "lpmatrix")
-
-    if (apply_cov_scaling){ # scale and center covariates if you want to
-      basis_ind_split <- split(seq_len(nrow(X_sz)),
-                               rep(seq_len(n_t), each = n_s))
-      for (ti in seq_along(basis_ind_split)){
-        rows <- basis_ind_split[[ti]]
-        X_sz[rows, ] <- apply(X = X_sz[rows, ], MARGIN = 2, scale)
-      }
-    }
-
   } else { # for diffusion-only case
     f_mod <- NULL
     X_sz <- NULL
@@ -114,7 +103,7 @@ mm <- function(formula = NULL,
     "d_scaling" = d_scaling    # scale discretization
   )
 
-  if (identical(move_comps, "diffusion")) {
+  if (all(move_comps == "diffusion")) {
     par_list = list(
       "ln_D" = 1
     )
@@ -132,9 +121,9 @@ mm <- function(formula = NULL,
 
     # ensures the basis expansion is indexed properly (by time variable)
     if (all(c("diffusion","taxis") %in% move_comps)) {
-      basis_ind_split <- split(seq_len(nrow(X_sz)),
-                               rep(seq_len(n_t), each = n_s))
-    } else if (identical(move_comps, "diffusion")) {
+      basis_ind <- seq(1, nrow(X_sz))
+      basis_ind_split <- split(basis_ind, sort(basis_ind %% n_t))
+    } else if (all(move_comps == "diffusion")) {
       h_s <- NULL
     }
 
@@ -143,7 +132,7 @@ mm <- function(formula = NULL,
 
       # calculates habitat preference given some parameters
       if (all(c("diffusion","taxis") %in% move_comps)) {
-        h_s <- X_sz[basis_ind_split[[ti]], , drop = FALSE] %*% cbind(beta_k)
+        h_s <- X_sz[ unlist(basis_ind_split[ti]), ] %*% cbind(beta_k)
       }
 
       # calculates M_dot
@@ -188,8 +177,7 @@ mm <- function(formula = NULL,
        A = A,
        formula = formula,
        preference_model = f_mod,
-       sd = tryCatch(RTMB::sdreport(obj),
-                     error = function(e) e))
+       sd = RTMB::sdreport(obj))
 }
 
 
@@ -224,7 +212,7 @@ M_dot <- function(A_ss,
     if (all(c("diffusion", "taxis") %in% move_comps)) {
       d_pref <- (pref_g[At_zz[,2]] - pref_g[At_zz[,1]])
       Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par + d_pref)
-    } else if (identical(move_comps, "diffusion")) {
+    } else if (all(move_comps == "diffusion")) {
       Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par)
     } else {
       stop("Unsupported move_comps")
@@ -238,7 +226,7 @@ M_dot <- function(A_ss,
       Mrate_gg[At_zz] <- Mrate_gg[At_zz] +
         D / delta_d^2 * exp((pref_g[At_zz[, 2]] - pref_g[At_zz[, 1]]) / delta_d)
 
-    } else if (identical(move_comps, "diffusion")) {
+    } else if (all(move_comps == "diffusion")) {
       Mrate_gg[At_zz] <- Mrate_gg[At_zz] + D / (delta_d^2)
     } else stop("Unsupported move_comps")
   } else {

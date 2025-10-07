@@ -200,7 +200,6 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
                      release_locs = grid1,
                      time = "year",
                      move_comps = c("diffusion", "taxis"),
-                     apply_cov_scaling = FALSE,
                      d_scaling = "none",
                      cellsize = cs){
 
@@ -236,8 +235,7 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
          tags_per_step,
          move_comps,
          cellsize,
-         d_scaling,
-         apply_cov_scaling)
+         d_scaling)
 
     if (any(is.na(mt_loo$sd$par.fixed)) |
         any(is.na(mt_loo$sd$cov.fixed))){
@@ -252,13 +250,13 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
       beta_k <- mt_loo$opt$par[names(mt_loo$opt$par) != "ln_D"]
       ln_D    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
       h_s <- X_gk %*% beta_k
-    } else if (identical(move_comps, "diffusion")) {
+    } else if (all(move_comps == "diffusion")) {
       ln_D    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
       pref_g <- NULL
     }
 
     A_ss <- mt_loo$A
-    At_zz = cbind( attr(A,"i"), attr(A,"j") ) + 1
+    At_zz = cbind( attr(A_ss,"i"), attr(A_ss,"j") ) + 1
     Mrate_gg <- M_dot(A_ss,
                       At_zz,
                       rate_par = ln_D,
@@ -267,14 +265,11 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
                       d_scaling,
                       delta_d = cellsize)
 
-    v_ig <- matrix(0, nrow=length(grid0), ncol=ncol(A))
+    v_ig <- matrix(0, nrow=length(grid0), ncol=ncol(A_ss))
     v_ig[cbind(seq_along(grid0), grid0)] = 1
-    f_ig <- v_ig %*% t(M)
+    v_ig_lo <- v_ig[i, ] #extract starting position for left out tag
 
-    v <- matrix(0, nrow = nrow(A), ncol = 1)
-    v[grid0[i], 1] <- 1 # starting position for left out tag
-
-    end_dist <- as.vector(t(Matrix::expm(Mrate_gg)) %*% v)
+    end_dist <- as.vector(t(Matrix::expm(Mrate_gg)) %*% v_ig_lo)
     # gridded_domain %>%
     #   st_as_sf() %>%
     #   mutate(end_dist) %>%
@@ -293,7 +288,6 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
   return(
     list(cv_preds = pred_out)
   )
-
 }
 
 m1_cv <-
@@ -367,7 +361,7 @@ calc_error <- function(model_cv,
 
   rmse <-
     data.frame(value = sqrt(mean(spat_resid^2)),
-             metric = "RMSE")
+               metric = "RMSE")
   resid_df <- tibble(spat_resid)
   return(list(rmse = rmse,
               resid_df = resid_df))

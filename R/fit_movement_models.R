@@ -247,7 +247,7 @@ m4.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37, 36),
+     tags_per_step = c(13, 13, 37),
      move_comps = c("diffusion", "taxis"),
      cellsize = cs,
      d_scaling = "none")
@@ -262,7 +262,7 @@ m5.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37, 36),
+     tags_per_step = c(13, 13, 37),
      move_comps = c("diffusion", "taxis"),
      cellsize = cs,
      d_scaling = "none")
@@ -278,7 +278,7 @@ m6.t <-
      deployment_locs = grid0,
      release_locs = grid1,
      time = "year",
-     tags_per_step = c(13, 13, 37, 36),
+     tags_per_step = c(13, 13, 37),
      move_comps = "diffusion",
      cellsize = cs,
      d_scaling = "none")
@@ -293,7 +293,6 @@ save(m1.t,
      m5.t,
      m6.t,
      file = here::here("data/fitted_movement_models.rdata"))
-
 
 save(grid2,
      male_crab_movement,

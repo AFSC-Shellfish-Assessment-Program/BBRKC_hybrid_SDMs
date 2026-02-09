@@ -14,7 +14,8 @@
 #' windows (e.g. `"year"`). Should be specified even if all tags were released during one time window.
 #' @param gridded_domain `sfc`-class variable where rows are polygons specifying
 #' the study region.
-#' @param cellsize Numeric length of one side of the polygons within `gridded_doman`.
+#' @param cellsize Numeric length of one side of the polygons within `gridded_doman`. Only considered in model
+#' fit when spatial scale discretization is applied but should be included regardless.
 #' @param deployment_locs Integer vector specifying the indices of `gridded_domain` where
 #' tags were deployed.
 #' @param release_locs Integer vector specifying the indices of `gridded_domain` where
@@ -80,6 +81,7 @@ mm <- function(formula = NULL,
 
   # spline basis expansion---
   if (!is.null(formula)){
+    data$y <- 0
     f_mod <- mgcv::gam(formula = as.formula(paste(c("y", as.character(formula)), collapse=" ")),
     data = data)
     X_sz <- mgcv::predict.gam(f_mod, newdata = data, type = "lpmatrix")
@@ -180,7 +182,6 @@ mm <- function(formula = NULL,
        sd = RTMB::sdreport(obj))
 }
 
-
 #' Internal function to generate the instantaneous movement rate matrix (M_dot).
 #' Inputs are constructed internally to mm(). Largely copied from the RTMB version
 #' of Spatio-temporal models for ecologists by Thorson and Kristensen 2024. Translated to
@@ -194,8 +195,6 @@ mm <- function(formula = NULL,
 #' @param move_comps `c("diffusion", "taxis")` or `"diffusion"`.
 #' @param d_scaling Spatial scale discretization method.
 #' @param delta_d `cellsize` parameter.
-#' @param colsumA_g Column sums of adjacency matrix.
-
 
 M_dot <- function(A_ss,
                   At_zz,
@@ -204,36 +203,48 @@ M_dot <- function(A_ss,
                   move_comps,
                   d_scaling,
                   delta_d) {
+
+  # set up
   Mrate_gg <- RTMB::AD(Matrix::Matrix(0, nrow(A_ss), ncol(A_ss)))
   ones <- matrix(1, ncol = 1, nrow = nrow(A_ss))
 
-  # no scale discretization applied
+  # no scale discretization applied (pre-print method)
   if (d_scaling == "none"){
     if (all(c("diffusion", "taxis") %in% move_comps)) {
-      d_pref <- (pref_g[At_zz[,2]] - pref_g[At_zz[,1]])
-      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par + d_pref)
+
+      taxis <- (pref_g[At_zz[,2]] - pref_g[At_zz[,1]])
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par + taxis)
+
     } else if (all(move_comps == "diffusion")) {
+
       Mrate_gg[At_zz] <- Mrate_gg[At_zz] + exp(rate_par)
+
     } else {
       stop("Unsupported move_comps")
     }
 
-    # default, ensures Metzler matrix
-  } else if (identical(d_scaling, "scale")) {
-    D <- exp(rate_par)
+    # fit with scale discretization
+  } else if (d_scaling == "scale") {
+
+    D <- exp(2 * rate_par)
+    pref_g_scaled <- pref_g / delta_d
+
     if (all(c("diffusion","taxis") %in% move_comps)) {
 
-      Mrate_gg[At_zz] <- Mrate_gg[At_zz] +
-        D / delta_d^2 * exp((pref_g[At_zz[, 2]] - pref_g[At_zz[, 1]]) / delta_d)
+      taxis <- (pref_g_scaled[At_zz[,2]] - pref_g_scaled[At_zz[,1]])
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + D / delta_d ^ 2 * exp(taxis)
 
     } else if (all(move_comps == "diffusion")) {
-      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + D / (delta_d^2)
+      Mrate_gg[At_zz] <- Mrate_gg[At_zz] + D / delta_d^2
     } else stop("Unsupported move_comps")
+
   } else {
-    stop("Unknown d_scaling")
+    stop("Unsupported scaling")
   }
-  row_sums <- Mrate_gg %*% ones # rowSums()
-  diag(Mrate_gg) <- diag(Mrate_gg) - as.vector(row_sums)
+
+
+  row_sums <- Mrate_gg %*% ones
+  Matrix::diag(Mrate_gg) <- Matrix::diag(Mrate_gg) - as.vector(row_sums)
   Mrate_gg
 }
 

@@ -28,11 +28,11 @@ load(here::here("data/agg_tc.rdata"))
 ## fitted spatiotemporal model outputs-----
 load(here::here("data/st_model_predictions.rdata"))
 
-## fitted movement models----
-load(here::here("data/fitted_movement_models.rdata"))
+## fitted movement models-----
+load(here::here("data/fitted_movement_models3.rdata"))
 
 ## movement model particulars----
-load(here::here("data/movement_model_particulars.rdata"))
+load(here::here("data/movement_model_particulars3.rdata"))
 
 ## source movement model----
 source(here::here("R/mm.R"))
@@ -40,14 +40,11 @@ source(here::here("R/mm.R"))
 # helper functions
 source(here::here("R/helpers.R"))
 
-# logbook data-----
-lb <- read_csv(here::here("data/rkc.logbook.clean.csv")) %>%
-  dplyr::select(-1) %>%
-  st_as_sf(., coords = c('longitude','latitude'), crs = 4326) %>%
-  st_transform(., crs = ak_crs)
+# logbook data (unavailable online)-----
+load(here::here("data/dfl_data.rdata"))
 
 # load fishery CPUE data (aggregated)
-load(here::here("data/agg_harvests_and_projections.rdata"))
+load(here::here("data/agg_harvests_and_projections2.rdata"))
 lb_agg2 <- lb_agg %>% mutate(catch_pp = ifelse(is.na(catch_pp), 0, catch_pp))
 
 # deployment locations-----
@@ -66,15 +63,13 @@ s1 <- st_coordinates(sf_s1)
 
 #combined environmental covariates
 env_cov_full <- agg_temp_interannual_sum_aut %>%
-  filter(year %in% 2005:2023,
+  filter(year %in% 2005:2024,
          month == 10) %>%
-  st_join(., agg_phi %>%
-            st_centroid(.)) %>%
   st_join(., agg_depth %>%
             st_centroid(.)) %>%
   st_join(., agg_tc %>%
             st_centroid(.)) %>%
-  filter(!is.na(depth) & !is.na(temp) & !is.na(phi) & !is.na(tidal_curr)) %>%
+  filter(!is.na(depth) & !is.na(temp) & !is.na(tidal_curr)) %>%
   st_intersection(., ebs)
 
 # deployment locations-----
@@ -92,8 +87,7 @@ sf_s1_locs <- male_crab_movement %>%
 env_cov_full_df <-
   env_cov_full %>%
   st_set_geometry(NULL) %>%
-  filter(month == 10) %>%
-  mutate(y = 0)
+  filter(month == 10)
 
 # gridded domain
 env_cov_full_sf <-
@@ -125,6 +119,7 @@ cov_mat <- pref_mod$sd$cov.fixed
 cov_diff <- diff_mod$sd$cov.fixed
 
 # simulate from fitted SDM
+nsim <- 250
 sdm_sim <- predict(m1_sdm, newdata = nd,
                    nsim = nsim, type = "response")
 
@@ -142,10 +137,15 @@ grid_A <- st_rook(env_cov_full %>%
 A_big <- as(grid_A,"sparseMatrix") |> as("TsparseMatrix")
 At_zz = cbind( attr(A_big,"i"), attr(A_big,"j") ) + 1
 
-all_years <- 2005:2023
-survey_years <- c(2005:2019, 2021:2023)
+all(env_cov_full_df %>% dplyr::filter(year == 2024) %>% nrow(),
+    dim(A_big)[1],
+    lb_agg2 %>% filter(year == 2024) %>% nrow())
+
+
+all_years <- 2005:2024
+survey_years <- c(2005:2019, 2021:2024)
 sim_out_diff <- NULL
-cog_out_diff <- NULL
+cog_out_diff.1 <- NULL
 for (i in all_years){
 
     if (i %in% survey_years){
@@ -171,15 +171,18 @@ for (i in all_years){
                            rate_par = ln_D_a,
                            pref_g = h_s_a,
                            move_comps = c("diffusion","taxis"),
-                           d_scaling = "none")
+                           d_scaling = "scale",
+                           delta_d = 20)
         M_sim <- Matrix::expm(Mrate_sim)
 
         ## diffusion only sims
         Mrate_sim_diff <- M_dot(A_ss = A_big,
                                 At_zz,
                                 rate_par = ln_D_b,
+                                pref_g = NULL,
                                 move_comps = "diffusion",
-                                d_scaling = "none")
+                                d_scaling = "scale",
+                                delta_d = 20)
         M_sim_diff <- Matrix::expm(Mrate_sim_diff)
 
         # For overlap
@@ -204,7 +207,7 @@ for (i in all_years){
             sim = j)
 
         assign("sim_out_diff", rbind(ovlp_int, sim_out_diff))
-        assign("cog_out_diff", rbind(cog_int, cog_out_diff))
+        assign("cog_out_diff.1", rbind(cog_int, cog_out_diff.1))
 
       }
 
@@ -230,12 +233,13 @@ for (i in all_years){
             sim = NA)
 
         assign("sim_out_diff", rbind(ovlp_int, sim_out_diff))
-        assign("cog_out_diff", rbind(cog_int, cog_out_diff))
+        assign("cog_out_diff.1", rbind(cog_int, cog_out_diff.1))
     }
   }
 
-sim_out_diff_v2 <- NULL
+sim_out_diff_v2.1 <- NULL
 for (yr in all_years){
+
     int2 <-
       env_cov_full_sf %>%
       st_join(.,
@@ -246,23 +250,22 @@ for (yr in all_years){
               lb_agg2  %>%
                 filter(year == yr) %>%
                 st_centroid(.) %>%
+                dplyr::select(-season, -date, -year) %>%
                 mutate(p_catch = catch_pp/sum(catch_pp)))  %>%
-      st_set_geometry(NULL) %>%
-      dplyr::rename(year = year.x) %>%
-      dplyr::select(-year.y)
+      st_set_geometry(NULL)
 
-  assign("sim_out_diff_v2", rbind(int2, sim_out_diff_v2))
+  assign("sim_out_diff_v2.1", rbind(int2, sim_out_diff_v2.1))
 }
 
 
 # we can calculate COGs in 2021/22 because the survey happened, but overlap cannot be calculated.
-ovlp_ts_v2 <-
-  sim_out_diff_v2 %>%
+ovlp_ts_v2.1 <-
+  sim_out_diff_v2.1 %>%
     group_by(year, sim) %>%
     dplyr::summarise(bhat_proj = sum(sqrt(p_catch * p_proj)),
                      bhat_diff = sum(sqrt(p_catch * p_diff))) %>%
-    left_join(., cog_out_diff) %>%
-    {. ->> dist_comps} %>%
+    left_join(., cog_out_diff.1) %>%
+    {. ->> dist_comps.1} %>%
     group_by(year) %>%
     dplyr::summarise(mean_proj = mean(bhat_proj, na.rm = T),
                      upr95_proj = quantile(bhat_proj, 0.975, na.rm = T),
@@ -288,3 +291,10 @@ ovlp_ts_v2 <-
                      mean_cog_lon_diff = mean(cog_lon_diff, na.rm = T),
                      upr95_cog_lon_diff = quantile(cog_lon_diff, 0.975, na.rm = T),
                      lwr95_cog_lon_diff = quantile(cog_lon_diff, 0.025, na.rm = T))
+
+
+save(sim_out_diff_v2.1,
+     dist_comps.1,
+     ovlp_ts_v2.1,
+     cog_out_diff.1,
+     file = here::here("data/ovlp_sims1.rdata"))

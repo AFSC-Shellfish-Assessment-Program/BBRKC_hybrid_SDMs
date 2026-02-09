@@ -8,7 +8,7 @@ project_distribution <- function(year = 2005,
                                  pred_df = pred,
                                  dep_locs = grid0,
                                  move_comps = c("diffusion", "taxis"),
-                                 cellsize = 25){
+                                 cellsize = 20){
 
   # filter environmental data
   env_cov <- temp_data %>%
@@ -40,7 +40,7 @@ project_distribution <- function(year = 2005,
                   rate_par = ln_D,
                   pref_g = h_s,
                   move_comps,
-                  d_scaling = "none",
+                  d_scaling = "scale",
                   delta_d = cellsize)
   M <- expm::expm(Mrate, do.sparseMsg = F)
 

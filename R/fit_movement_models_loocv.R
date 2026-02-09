@@ -6,11 +6,12 @@ library(Matrix)
 library(mgcv)
 library(sdmTMB)
 library(RTMB)
+library(splines2)
 
 # Load data, source movement model----
 
 ## CRS----
-ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
+ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units= km +no_defs"
 
 ## boundary and grid data----
 load(here::here("data/spatial_layers.rdata"))
@@ -34,27 +35,6 @@ source(here::here("R/mm.R"))
 source(here::here("R/helpers.R"))
 
 # Data processing----
-
-## reduces size of spatial domain for model fitting----
-ebs_abridged <- st_read(here::here("data/ebs_pretty_no_goa_move_lim.kml")) %>%
-  st_zm() %>%
-  st_transform(., crs = ak_crs)
-
-## environmental covariates----
-env_cov_full <- agg_temp_interannual_sum_aut %>%
-  filter(year %in% 2005:2023,
-         month == 10) %>%
-  st_join(., agg_phi %>%
-            st_centroid(.)) %>%
-  st_join(., agg_depth %>%
-            st_centroid(.)) %>%
-  st_join(., agg_tc %>%
-            st_centroid(.)) %>%
-  filter(!is.na(depth) & !is.na(temp) & !is.na(phi) & !is.na(tidal_curr)) %>%
-  st_intersection(., ebs_abridged)
-
-env_cov <- env_cov_full %>% filter(year %in% 2021:2023,
-                                   month == 10)
 
 ## import, process, and combine tagging data------
 m2021 <-
@@ -108,6 +88,24 @@ m2023 <-
   st_set_geometry(NULL) %>%
   mutate(year = 2023)
 
+m2024 <-
+  read_csv(here::here("data/2024_Oct_BBRKC_Male_Final.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = release_lon,
+         deploy_lat = release_lat) %>%
+  mutate(tag = factor(tag)) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL) %>%
+  mutate(year = 2024) %>%
+  filter(tag != "263793")
+
 male_crab_movement <-
   bind_rows(
     m2021 %>%
@@ -121,65 +119,107 @@ male_crab_movement <-
     m2023 %>%
       dplyr::select(tag, deploy_t, rel_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year))
+                    year),
+    m2024 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year)
+  )
 
-## deployment locations-----
+
+# deployment locations-----
 sf_s0 = st_as_sf(male_crab_movement[,c('deploy_lon','deploy_lat','year')],
                  coords = c('deploy_lon','deploy_lat'),
                  crs = ak_crs)
 s0 <- st_coordinates(sf_s0)
 
-## pop-up locations-----
+# pop-up locations-----
 sf_s1 <- st_as_sf(male_crab_movement[,c('lon0','lat0','year')],
                   coords = c('lon0','lat0'),
                   crs = ak_crs)
 s1 <- st_coordinates(sf_s1)
 
-## deployment location grid cells----
-grid0 <- c(unlist(st_intersects( sf_s0 %>%
-                                   filter(year == 2021),
-                                 env_cov %>%
-                                   filter(year == 2021,
-                                          month == 10))),
-           unlist(st_intersects( sf_s0 %>%
-                                   filter(year == 2022),
-                                 env_cov %>%
-                                   filter(year == 2022,
-                                          month == 10))),
-           unlist(st_intersects( sf_s0 %>%
-                                   filter(year == 2023),
-                                 env_cov %>%
-                                   filter(year == 2023,
-                                          month == 10))))
-## pop-up location grid cells----
-grid1 <- c(unlist(st_intersects( sf_s1 %>%
-                                   filter(year == 2021),
-                                 env_cov %>%
-                                   filter(year == 2021,
-                                          month == 10))),
-           unlist(st_intersects( sf_s1 %>%
-                                   filter(year == 2022),
-                                 env_cov %>%
-                                   filter(year == 2022,
-                                          month == 10))),
-           unlist(st_intersects( sf_s1 %>%
-                                   filter(year == 2023),
-                                 env_cov %>%
-                                   filter(year == 2023,
-                                          month == 10))))
 
-## environmental data for fitting the model----
+## environmental covariates----
+env_cov_full <- agg_temp_interannual_sum_aut %>%
+  filter(year %in% 2005:2024,
+         month == 10) %>%
+  st_join(., agg_depth %>%
+            st_centroid(.)) %>%
+  st_join(., agg_tc %>%
+            st_centroid(.)) %>%
+  filter(!is.na(depth) & !is.na(temp) & !is.na(tidal_curr)) %>%
+  st_transform(., crs = ak_crs) %>%
+  st_intersection(ebs)
+
+env_cov <- env_cov_full %>% filter(year %in% 2021:2024,
+                                   month == 10)
+
+ggplot() +
+  geom_sf(data = env_cov) +
+  geom_sf(data = sf_s1) +
+  geom_sf(data = sf_s0)
+
+# deployment location grid cells----
+grid0 <- c(
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2021),
+                        env_cov %>%
+                          filter(year == 2021,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2022),
+                        env_cov %>%
+                          filter(year == 2022,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2023),
+                        env_cov %>%
+                          filter(year == 2023,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2024),
+                        env_cov %>%
+                          filter(year == 2024,
+                                 month == 10)))
+)
+
+# pop-up location grid cells----
+grid1 <- c(
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2021),
+                        env_cov %>%
+                          filter(year == 2021,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2022),
+                        env_cov %>%
+                          filter(year == 2022,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2023),
+                        env_cov %>%
+                          filter(year == 2023,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2024),
+                        env_cov %>%
+                          filter(year == 2024,
+                                 month == 10)))
+)
+
+# length(grid0) == length(grid1)
+
+# join spatial data to fit model
 out_interannual <-
   env_cov %>%
-  filter(month == 10) %>%
   group_by(year) %>%
   mutate(id = 1:n()) %>%
   st_set_geometry(NULL) %>%
-  mutate(y = 0) %>%
   arrange(year, id) %>%
   ungroup() %>%
   mutate(id2 = 1:nrow(.),
-         yf = factor(year))
+         yf = factor(year)) #%>%
 
 ## gridded spatial domain----
 grid2 <-
@@ -200,7 +240,7 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
                      release_locs = grid1,
                      time = "year",
                      move_comps = c("diffusion", "taxis"),
-                     d_scaling = "none",
+                     d_scaling = "scale",
                      cellsize = cs){
 
   gridded_domain_df <- gridded_domain %>%
@@ -215,15 +255,19 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
     grid1.loo <- release_locs[-i]
 
     if (i <= 13){
-      tags_per_step = c(12, 13, 37)
+      tags_per_step = c(12, 13, 37, 35)
       yr <- 2021
     } else if (i > 13 & i <= 26){
-      tags_per_step = c(13, 12, 37)
+      tags_per_step = c(13, 12, 37, 35)
       yr <- 2022
-    } else if (i > 26){
-      tags_per_step = c(13, 13, 36)
+    } else if (i > 26 & i <= 63){
+      tags_per_step = c(13, 13, 36, 35)
       yr <- 2023
+    } else if (i > 63){
+      tags_per_step = c(13, 13, 37, 34)
+      yr <- 2024
     }
+
 
     mt_loo <-
       mm(formula,
@@ -252,7 +296,7 @@ mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,
       h_s <- X_gk %*% beta_k
     } else if (all(move_comps == "diffusion")) {
       ln_D    <- mt_loo$opt$par[names(mt_loo$opt$par) == "ln_D"]
-      pref_g <- NULL
+      h_s <- NULL
     }
 
     A_ss <- mt_loo$A
@@ -344,6 +388,11 @@ m6_cv <-
            time = "year",
            move_comps = "diffusion")
 
+
+# load(here::here("data/loocv_3_4_1_22.rdata"))
+# load(here::here("data/loocv_5_6_1_21.rdata"))
+# load(here::here("data/loocv_1_2_1_19.rdata"))
+
 # function to calculate RMSE
 # ~ 0 + te(depth, tidal_curr, k = 3) + s(temp, k = 4)
 calc_error <- function(model_cv,
@@ -421,4 +470,3 @@ movement_resids <-
 save(movement_rmse,
      movement_resids,
      file = here::here("data/movement_model_LOOCV_stats.rdata"))
-

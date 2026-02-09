@@ -10,6 +10,17 @@ library(concaveman)
 # Load data----
 ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units=km +no_defs"
 
+# plot limits
+ylims = c(53.75, 62)
+xlims = c(-175.5, -157.5)
+
+bb_ll <- st_bbox(c(
+  xmin = xlims[1], ymin = ylims[1],
+  xmax = xlims[2], ymax = ylims[2]),
+  crs = st_crs(4326)) %>%
+  st_as_sfc() %>%
+  st_transform(., ak_crs)
+
 # boundary and grid data
 load(here::here("data/spatial_layers.rdata"))
 
@@ -31,20 +42,18 @@ load(here::here("data/movement_model_particulars.rdata"))
 # helper functions
 source(here::here("R/helpers.R"))
 
-# prediction grid (taken from merged environmental data to ensure it maps identically to
-# movement model outputs)
+# prediction grid
 pred_grid <-
   agg_temp_interannual_sum_aut %>%
-    filter(year %in% 2005:2023,
-           month == 10) %>%
-  st_join(., agg_phi %>%
-            st_centroid(.)) %>%
+  filter(year %in% 2005:2024,
+         month == 10) %>%
   st_join(., agg_depth %>%
             st_centroid(.)) %>%
   st_join(., agg_tc %>%
             st_centroid(.)) %>%
-  filter(!is.na(depth) & !is.na(temp) & !is.na(phi) & !is.na(tidal_curr)) %>%
-  st_intersection(., ebs)
+  filter(!is.na(depth) & !is.na(temp) & !is.na(tidal_curr)) %>%
+  st_transform(., crs = ak_crs) %>%
+  st_intersection(ebs)
 
 # survey data-----
 df_sf <-
@@ -54,7 +63,7 @@ df_sf <-
                 lon = longitude,
                 lat = latitude) %>%
   mutate(cpue = cpue/3.429) %>% # convert CPUE from nm^-2 to km^-2
-  filter(year %in% 2005:2023,
+  filter(year %in% 2005:2024,
          mat_sex == "Mature Male") %>%
   st_as_sf(., coords = c("lon", "lat"),
            crs = 4326) %>%
@@ -89,40 +98,22 @@ ebs_spde <- sdmTMB::make_mesh(data = df,
                               mesh = mesh)
 
 ## Visualizing for appendix------------
-a <-   st_bbox(c(xmin = -1500, xmax = -50,
-                 ymin = 400, ymax = 1500),
-               crs = st_crs(ak_land)) %>%
-  st_as_sfc() %>%
-  st_make_grid(., cellsize = 150)
 
-# mesh figure-----
-png(filename = here::here("figs/ebs_mesh.png"),
-    width = 10, height = 8,
+### mesh figure-----
+ak_land2 <- ak_land %>%
+  st_intersection(, bb_ll)
+#
+png(filename = here::here("figs/supp_map/ebs_mesh.png"),
+    width = 6, height = 6,
     units = "in", res = 300)
-
-plot(a,
-     col = "white",
-     axes = T,
-     xlim = c(-1000, -500),
-     ylim = c(500, 1550),
+plot(ak_land2,
+     axes = TRUE,
+     col = "grey",
+     xlim = c(-1100, -400),
      xlab = "Eastings (km)",
      ylab =  "Northings (km)",
-     xaxt = "n",
-     yaxt = "n",
-     border = "grey90",
-     cex.lab = 1.7,
-     cex.axis = 1.5)
-# plot(ebs_grid, add = T)
-plot(ak_land,
-     col = "grey",
-     xlim = c(-1000, -500),
-     ylim = c(500, 1400),
-     add = T)
+     ylim = c(500, 1400))
 plot(ebs_spde, add = T)
-axis(1, at = seq(-1500, 50, by = 150))
-axis(3,at = seq(-1500, 50, by = 150), labels = F, tick = T)
-axis(2, at = seq(400, 1500, by = 150))
-axis(4, labels = F, tick = T,at = seq(400, 1500, by = 150))
 dev.off()
 
 # prediction grid for spatiotemporal and movement models----
@@ -131,32 +122,17 @@ pred_grid_sfc <- pred_grid %>%
   st_as_sfc()
 
 # prediction grid figure----
-png(filename = here::here("figs/pred_grid.png"),
-    width = 10, height = 8,
+png(filename = here::here("figs/supp_map/pred_grid.png"),
+    width = 6, height = 6,
     units = "in", res = 300)
-plot(a,
-     col = "white",
-     axes = T,
-     xlim = c(-1000, -500),
-     ylim = c(500, 1400),
+plot(ak_land2,
+     axes = TRUE,
+     col = "grey",
+     xlim = c(-1100, -400),
      xlab = "Eastings (km)",
      ylab =  "Northings (km)",
-     xaxt = "n",
-     yaxt = "n",
-     border = "grey90",
-     cex.lab = 1.7,
-     cex.axis = 1.5)
-plot(ak_land,
-     col = "grey",
-     xlim = c(-1000, -500),
-     ylim = c(500, 1400),
-     add = T)
-plot(pred_grid_sfc, add = T, border = "purple", lwd = 3)
-plot(grid2, add = T, border = "black")
-axis(1, at = seq(-1500, 50, by = 150))
-axis(3,at = seq(-1500, 50, by = 150), labels = F, tick = T)
-axis(2, at = seq(400, 1500, by = 150))
-axis(4, labels = F, tick = T,at = seq(400, 1500, by = 150))
+     ylim = c(500, 1400))
+plot(pred_grid_sfc, add = T, border = "purple", lwd = 2)
 dev.off()
 
 ## fit IID tweedie glmm w/ spatial and spatiotemporal random fields----
@@ -191,6 +167,7 @@ pred <- sdmTMB:::predict.sdmTMB(object = m1_sdm,
 pred_df_sf <-
   pred_grid %>%
   dplyr::select(geometry) %>%
+  distinct() %>%
   st_join(., pred) #%>%
 
 df$resids <- residuals(m1_sdm,
@@ -209,3 +186,4 @@ save(pred,
      pred_grid,
      nd,
      file = here::here("data/st_model_predictions.rdata"))
+

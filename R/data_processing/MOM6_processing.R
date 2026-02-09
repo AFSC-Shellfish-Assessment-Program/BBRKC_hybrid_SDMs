@@ -79,11 +79,11 @@ m2023_s <-
 #                    m = abs(m_rel - m_dep)/7)
 
 ## Extract gridded data to reflect BT during tag release-------`
-fns <- list.files(here::here("data/new_mom6/"))
+fns <- list.files(here::here("~/git/new_mom6/"))
 bt_all <- NULL
 for (f in seq_along(fns)){
   print(fns[f])
-  bt_init <- stars::read_ncdf(here::here("data/new_mom6/",fns[f]),
+  bt_init <- stars::read_ncdf(here::here("~/git/new_mom6/",fns[f]),
                               var = "tob", proxy = F)
   if (is.null(bt_all)) {
     bt_all <- bt_init
@@ -104,6 +104,7 @@ yc = matrix(ocean_proj[[2]], 342, 297)
 
 years <- 2005:2024
 agg_temp_interannual_sum_aut <- NULL
+big_grid_4326 <- big_grid %>% st_union() %>% st_transform(., "EPSG:4326") %>% st_make_valid()
 for (i in years){
   for (m in c(10, 6)){
     message(paste0(i, m))
@@ -117,14 +118,13 @@ for (i in years){
       st_as_stars(.,
                   curvilinear = list(ih = xc,
                                      jh = yc)) %>%
-      .[ebs_area] %>%
+      .[big_grid_4326] %>%
       st_apply(., c("ih","jh"), mean)
 
-    # convert to sf and intersect with survey area. Transform CRS to AEA coordinates
+    # convert to sf. Transform CRS to AEA coordinates
     sf_temp <-
       bt_slice %>%
       st_as_sf() %>%
-      st_intersection(., ebs_area) %>%
       dplyr::rename(temp = 1) %>%
       st_transform(ak_crs)
 

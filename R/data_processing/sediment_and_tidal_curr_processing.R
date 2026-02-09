@@ -38,23 +38,23 @@ agg_tc <- aggregate(sf_tc, by = big_grid, FUN = mean, na.rm = FALSE) %>%
   dplyr::rename(tidal_curr = X3.pred)
 
 
-# for (i in 1:nrow(agg_tc)){
-#   tci <- agg_tc %>% slice(i) %>% pull(tidal_curr)
-#   if (!is.na(tci)){
-#     next
-#   } else {
-#     tc_buff <- agg_tc %>%
-#       slice(i) %>%
-#       st_buffer(dist = 10) %>%
-#       dplyr::select(-tidal_curr) %>%
-#       st_intersection(., agg_tc)
-#
-#     tc_buff_mean <- mean(tc_buff$tidal_curr, na.rm = T)
-#     agg_tc[i,]$tidal_curr <- tc_buff_mean
-#   }
-# }
-#
-#
+for (i in 1:nrow(agg_tc)){
+  tci <- agg_tc %>% slice(i) %>% pull(tidal_curr)
+  if (!is.na(tci)){
+    next
+  } else {
+    tc_buff <- agg_tc %>%
+      slice(i) %>%
+      st_buffer(dist = 10) %>%
+      dplyr::select(-tidal_curr) %>%
+      st_intersection(., agg_tc)
+
+    tc_buff_mean <- mean(tc_buff$tidal_curr, na.rm = T)
+    agg_tc[i,]$tidal_curr <- tc_buff_mean
+  }
+}
+
+
 # ggplot( ) +
 #   geom_sf(data = agg_tc, aes(fill = tidal_curr)) +
 #   geom_sf(data = sf_s1) +

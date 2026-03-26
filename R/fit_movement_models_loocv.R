@@ -230,7 +230,7 @@ grid2 <-
 # load fitted models to get habitat preference formulas
 load(here::here("data/fitted_movement_models.rdata"))
 
-cs <- 25
+cs <- 20
 
 # function to do LOOCV------
 mm_loocv <- function(formula  = ~ 0 + tidal_curr + temp + depth,

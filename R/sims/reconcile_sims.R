@@ -31,9 +31,12 @@ dist_comps <-
 cog_out_diff <-
   bind_rows(
     cog_out_diff.1,
-    cog_out_diff.2,
-    cog_out_diff.3,
-    cog_out_diff.4
+    cog_out_diff.2 %>%
+      mutate(sim = sim + 250),
+    cog_out_diff.3 %>%
+      mutate(sim = sim + 500),
+    cog_out_diff.4 %>%
+      mutate(sim = sim + 750)
   )
 
 ovlp_ts_v2 <-
@@ -41,9 +44,7 @@ ovlp_ts_v2 <-
   group_by(year, sim) %>%
   dplyr::summarise(bhat_proj = sum(sqrt(p_catch * p_proj)),
                    bhat_diff = sum(sqrt(p_catch * p_diff))) %>%
-  left_join(., cog_out_diff) %>%
-  {. ->> dist_comps} %>%
-  group_by(year) %>%
+  left_join(., cog_out_diff, by = c("year", "sim")) %>%
   dplyr::summarise(mean_proj = mean(bhat_proj, na.rm = T),
                    upr95_proj = quantile(bhat_proj, 0.975, na.rm = T),
                    lwr95_proj = quantile(bhat_proj, 0.025, na.rm = T),

@@ -26,13 +26,13 @@ load(here::here("data/agg_phi.rdata"))
 load(here::here("data/agg_tc.rdata"))
 
 ## fitted spatiotemporal model outputs-----
-load(here::here("data/st_model_predictions.rdata"))
+load(here::here("data/st_model_predictions_dl.rdata"))
 
 ## fitted movement models-----
-load(here::here("data/fitted_movement_models3.rdata"))
+load(here::here("data/fitted_movement_models.rdata"))
 
 ## movement model particulars----
-load(here::here("data/movement_model_particulars3.rdata"))
+load(here::here("data/movement_model_particulars.rdata"))
 
 ## source movement model----
 source(here::here("R/mm.R"))
@@ -44,7 +44,7 @@ source(here::here("R/helpers.R"))
 load(here::here("data/dfl_data.rdata"))
 
 # load fishery CPUE data (aggregated)
-load(here::here("data/agg_harvests_and_projections2.rdata"))
+load(here::here("data/agg_harvests_and_projections.rdata"))
 lb_agg2 <- lb_agg %>% mutate(catch_pp = ifelse(is.na(catch_pp), 0, catch_pp))
 
 # deployment locations-----
@@ -120,8 +120,8 @@ cov_diff <- diff_mod$sd$cov.fixed
 
 # simulate from fitted SDM
 nsim <- 250
-sdm_sim <- predict(m1_sdm, newdata = nd,
-                   nsim = nsim, type = "response")
+sdm_sim_link <- predict(m1_sdm_dl1, newdata = nd, model = NA, nsim = nsim)
+sdm_sim <- exp(sdm_sim_link)
 
 # simulate from fitted movement models
 par_draws_pref <- rmvnorm(nsim, mean = ests, sigma = cov_mat)
@@ -258,43 +258,7 @@ for (yr in all_years){
 }
 
 
-# we can calculate COGs in 2021/22 because the survey happened, but overlap cannot be calculated.
-ovlp_ts_v2.2 <-
-  sim_out_diff_v2.2 %>%
-  group_by(year, sim) %>%
-  dplyr::summarise(bhat_proj = sum(sqrt(p_catch * p_proj)),
-                   bhat_diff = sum(sqrt(p_catch * p_diff))) %>%
-  left_join(., cog_out_diff.2) %>%
-  {. ->> dist_comps.2} %>%
-  group_by(year) %>%
-  dplyr::summarise(mean_proj = mean(bhat_proj, na.rm = T),
-                   upr95_proj = quantile(bhat_proj, 0.975, na.rm = T),
-                   lwr95_proj = quantile(bhat_proj, 0.025, na.rm = T),
-
-                   mean_diff = mean(bhat_diff, na.rm = T),
-                   upr95_diff = quantile(bhat_diff, 0.975, na.rm = T),
-                   lwr95_diff = quantile(bhat_diff, 0.025, na.rm = T),
-
-                   mean_cog_lat = mean(cog_lat, na.rm = T),
-                   upr95_cog_lat = quantile(cog_lat, 0.975, na.rm = T),
-                   lwr95_cog_lat = quantile(cog_lat, 0.025, na.rm = T),
-
-                   mean_cog_lon = mean(cog_lon, na.rm = T),
-                   upr95_cog_lon = quantile(cog_lon, 0.975, na.rm = T),
-                   lwr95_cog_lon = quantile(cog_lon, 0.025, na.rm = T),
-
-
-                   mean_cog_lat_diff = mean(cog_lat_diff, na.rm = T),
-                   upr95_cog_lat_diff = quantile(cog_lat_diff, 0.975, na.rm = T),
-                   lwr95_cog_lat_diff = quantile(cog_lat_diff, 0.025, na.rm = T),
-
-                   mean_cog_lon_diff = mean(cog_lon_diff, na.rm = T),
-                   upr95_cog_lon_diff = quantile(cog_lon_diff, 0.975, na.rm = T),
-                   lwr95_cog_lon_diff = quantile(cog_lon_diff, 0.025, na.rm = T))
-
-
 save(sim_out_diff_v2.2,
      dist_comps.2,
-     ovlp_ts_v2.2,
      cog_out_diff.2,
      file = here::here("data/ovlp_sims2.rdata"))

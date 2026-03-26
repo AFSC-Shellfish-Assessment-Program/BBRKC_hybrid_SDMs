@@ -36,7 +36,7 @@ ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +da
 load(here::here("data/spatial_layers.rdata"))
 
 nbbtca <- other_sa %>% filter(name == "NBBTCA")
-process <- F
+process <- TRUE
 
 # load model particulars-----
 
@@ -53,7 +53,7 @@ load(here::here("data/agg_phi.rdata"))
 load(here::here("data/agg_tc.rdata"))
 
 ## fitted spatiotemporal model outputs-----
-load(here::here("data/st_model_predictions.rdata"))
+load(here::here("data/st_model_predictions_dl.rdata"))
 
 ## movement LOOCV
 load(here::here("data/movement_model_LOOCV_stats.rdata"))
@@ -563,8 +563,6 @@ grp    <- factor(rep(c("west", "east"), c(length(west_bear), length(east_bear)))
 
 # Watson–Williams test for comparing groups of angles
 watson.williams.test(angles, grp)
-
-
 
 # depth and tidal current comparison
 depth_comp <- 
@@ -1549,17 +1547,8 @@ ggsave(ovlp_plot_full,
 # Overlap simulations
 
 ```{r}
-if (process){
-  nsim <- 1000# sims per year
-  source(here::here("R/overlap_sims.R"))
-  save(sim_out_diff_v2,
-       dist_comps,
-       ovlp_ts_v2,
-        file = here::here("data/ovlp_sims.rdata"))
-
-} else {
-  load(here::here("data/ovlp_sims.rdata"))
-}
+# see R/sims/reconcile_sims.R and overlap_sims scripts
+load(here::here("data/ovlp_sims.rdata"))
 ```
 
 ### Overlap hypothesis testing
@@ -1592,40 +1581,10 @@ for (y in 2005:2024){
   assign("lb_cog", rbind(lb_cog_int, lb_cog))
 }
 
-distances <- 
-  dist_comps %>% 
-    left_join(., lb_cog) %>% 
-    filter(!is.na(cog_lon_catch) &
-             !is.na(cog_lon))
-
-# distances between fishing CPUE centroid and projection centroid using the
-# diffusion-taxis model or...
-sim_dists_proj <- 
-    st_distance(
-      distances %>% 
-        st_as_sf(., coords = c("cog_lon","cog_lat")),
-      
-      distances %>% 
-        st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
-        by_element = T
-    )
-
-# the diffusion only model
-sim_dists_diff <- 
-    st_distance(
-      distances %>% 
-        st_as_sf(., coords = c("cog_lon_diff","cog_lat_diff")),
-      
-      distances %>% 
-        st_as_sf(., coords = c("cog_lon_catch","cog_lat_catch")),
-        by_element = T
-    )
-
-distances$sim_dists_proj <- sim_dists_proj
-distances$sim_dists_diff <- sim_dists_diff
 
 bhat_eta <- NULL
 for (i in c(2005:2019, 2023:2024)) {
+  # print(dist_comps %>% filter(year == i) %>% pull(bhat_diff) %>% unique() %>% length())
   bhat_proj <- dist_comps %>% filter(year == i) %>% pull(bhat_proj)
   bhat_diff <- dist_comps %>% filter(year == i) %>% pull(bhat_diff)
 
@@ -1638,22 +1597,6 @@ for (i in c(2005:2019, 2023:2024)) {
     labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
   assign("bhat_eta", rbind(bhat_eta, tibble(year = i,
                                             bhat_eta = overlap_results$OV)))
-}
-
-dist_eta <- NULL
-for (i in c(2005:2019, 2023:2024)) {
-  dist_proj <- distances %>% filter(year == i) %>% pull(sim_dists_proj)
-  dist_diff <- distances %>% filter(year == i) %>% pull(sim_dists_diff)
-
-  # Put data into a list
-  data_list <- list(dist_proj = dist_proj, dist_diff = dist_diff)
-
-  # Estimate overlapping area (type = "2" for proportion)
-  overlap_results <- overlap(data_list, type = "2", plot = FALSE)
-  print(final.plot(data_list) +
-    labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
-  assign("dist_eta", rbind(dist_eta, tibble(year = i,
-                                            dist_eta = overlap_results$OV)))
 }
 
 ```
@@ -1803,7 +1746,7 @@ r2_lab <- tibble(r2 = paste0("R<sup>2</sup> = ",
                              round(summary(lm(lon_cog_catch ~ lon_mean_cog, 
                                               data = ovlp_ts_v2.3))$r.squared, 2)),
        y = -162,
-       x = -163.6)
+       x = -163.425)
 
 # Test for latitude relationship----
 # summary(lm(lat_cog_catch ~ lat_mean_cog,
@@ -1857,6 +1800,20 @@ ggsave(lon_lat_plts,
 # ggplot(lb) +
 #   geom_sf(data = ak_land) + geom_sf() +
 #   facet_wrap(~year) + coord_sf(xlim = c(-850, -250), ylim = c(600, 1000), datum = ak_crs)
+
+ovlp_ts_v2.1 %>% 
+  dplyr::select(year, mean_cog_lon, cog_lon_catch) %>% 
+  mutate(diff = mean_cog_lon - cog_lon_catch) %>% 
+  arrange(year)
+
+ovlp_ts_v2.1 %>% 
+  dplyr::select(year, mean_cog_lat, cog_lat_catch) %>% 
+  dplyr::summarise(mean_cog_lat = mean(mean_cog_lat, na.rm = T),
+                   cog_lat_catch = mean(cog_lat_catch, na.rm = T)) %>% 
+  mutate(diff = mean_cog_lat - cog_lat_catch)
+
+
+
 
 ```
 
@@ -1918,6 +1875,7 @@ ggsave(b_diff_plt,
 ### Temperature effects on centroid positions
 
 ```{r}
+
 map_temp_plt <-
   # projected density centroids
   ggplot(temp_combined)+
@@ -1947,7 +1905,7 @@ map_temp_plt <-
                     y = lat_mean_cog),
                 color = "gray",
                 width = 0) +
-    geom_point(aes(y = lat_mean_cog, x = lon_mean_cog, color = t_m), size = 4) +
+    geom_point(aes(y = lat_mean_cog, x = lon_mean_cog, color = t_m, group = year), size = 4) +
     scale_color_gradient2(midpoint = 6.5,
                           low = scales::muted("blue"),
                             high = scales::muted("red")) +
@@ -1960,7 +1918,7 @@ map_temp_plt <-
     theme(legend.key.height = unit(0.4, "cm"),
           legend.title = element_text(size = 12),
           axis.title = element_text(size = 12),
-          axis.text = element_text(size = 9)) +
+          axis.text = element_text(size = 9)) 
   
   #fishery CPUE centroids
   ggplot(temp_combined)+
@@ -2006,7 +1964,7 @@ map_temp_plt
 ggsave(map_temp_plt,
        filename = here::here("figs/temp_effect_on_overlap/temp_effect_centroid_map.png"),
        width = 10,
-       height = 6,
+       height = 5,
        dpi = 300)
 ```
 

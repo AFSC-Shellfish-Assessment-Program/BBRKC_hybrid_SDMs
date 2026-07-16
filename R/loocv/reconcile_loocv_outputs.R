@@ -1,0 +1,312 @@
+library(tidyverse)
+library(raster)
+library(sf)
+library(stars)
+library(Matrix)
+library(mgcv)
+library(sdmTMB)
+library(RTMB)
+library(splines2)
+
+# Load data, source movement model----
+
+## CRS----
+ak_crs <- "+proj=aea +lat_0=50 +lon_0=-154 +lat_1=55 +lat_2=65 +x_0=0 +y_0=0 +datum=NAD83 +units= km +no_defs"
+
+## boundary and grid data----
+load(here::here("data/spatial_layers.rdata"))
+
+## load temperature layer (June and Otober bottom temps from MOM6)----
+load(here::here('data/agg_temp_interannual_sum_aut_mom6.rdata'))
+
+## load bathymetry layer----
+load(here::here("data/agg_depth.rdata"))
+
+## load sediment grain size layer----
+load(here::here("data/agg_phi.rdata"))
+
+## load tidal current maxima layer----
+load(here::here("data/agg_tc.rdata"))
+
+## source movement model----
+source(here::here("R/mm.R"))
+
+# helper functions
+source(here::here("R/helpers.R"))
+
+# Data processing----
+
+## import, process, and combine tagging data------
+m2021 <-
+  read_csv(here::here("data/2021_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rel_lon,
+         deploy_lat = rel_lat) %>%
+  mutate(tag = factor(tag)) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL) %>%
+  mutate(year = 2021)
+
+m2022 <-
+  read_csv(here::here("data/2022_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rellongdd,
+         deploy_lat = rellatdd) %>%
+  mutate(tag = factor(tag)) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL) %>%
+  mutate(year = 2022)
+
+m2023 <-
+  read_csv(here::here("data/2023_Oct_BBRKC_Male_FINAL.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = rellongdd,
+         deploy_lat = releaselatdd) %>%
+  mutate(tag = factor(tag)) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL) %>%
+  mutate(year = 2023)
+
+m2024 <-
+  read_csv(here::here("data/2024_Oct_BBRKC_Male_Final.csv")) %>%
+  rename_all(str_to_lower) %>%
+  rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+  rename(deploy_lon = release_lon,
+         deploy_lat = release_lat) %>%
+  mutate(tag = factor(tag)) %>%
+  st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  st_set_geometry(NULL) %>%
+  st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+  st_transform(., crs = ak_crs) %>%
+  sfc_as_cols(., names = c("lon0","lat0")) %>%
+  st_set_geometry(NULL) %>%
+  mutate(year = 2024) %>%
+  filter(tag != "263793")
+
+male_crab_movement <-
+  bind_rows(
+    m2021 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year) ,
+    m2022 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year) ,
+    m2023 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year),
+    m2024 %>%
+      dplyr::select(tag, deploy_t, rel_t, deploy_days,
+                    t0, lat0, lon0, deploy_lon, deploy_lat,
+                    year)
+  )
+
+
+# deployment locations-----
+sf_s0 = st_as_sf(male_crab_movement[,c('deploy_lon','deploy_lat','year')],
+                 coords = c('deploy_lon','deploy_lat'),
+                 crs = ak_crs)
+s0 <- st_coordinates(sf_s0)
+
+# pop-up locations-----
+sf_s1 <- st_as_sf(male_crab_movement[,c('lon0','lat0','year')],
+                  coords = c('lon0','lat0'),
+                  crs = ak_crs)
+s1 <- st_coordinates(sf_s1)
+
+
+## environmental covariates----
+env_cov_full <- agg_temp_interannual_sum_aut %>%
+  filter(year %in% 2005:2024,
+         month == 10) %>%
+  st_join(., agg_depth %>%
+            st_centroid(.)) %>%
+  st_join(., agg_tc %>%
+            st_centroid(.)) %>%
+  filter(!is.na(depth) & !is.na(temp) & !is.na(tidal_curr)) %>%
+  st_transform(., crs = ak_crs) %>%
+  st_intersection(ebs)
+
+env_cov <- env_cov_full %>% filter(year %in% 2021:2024,
+                                   month == 10)
+
+ggplot() +
+  geom_sf(data = env_cov) +
+  geom_sf(data = sf_s1) +
+  geom_sf(data = sf_s0)
+
+# deployment location grid cells----
+grid0 <- c(
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2021),
+                        env_cov %>%
+                          filter(year == 2021,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2022),
+                        env_cov %>%
+                          filter(year == 2022,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2023),
+                        env_cov %>%
+                          filter(year == 2023,
+                                 month == 10))),
+  unlist(st_intersects( sf_s0 %>%
+                          filter(year == 2024),
+                        env_cov %>%
+                          filter(year == 2024,
+                                 month == 10)))
+)
+
+# pop-up location grid cells----
+grid1 <- c(
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2021),
+                        env_cov %>%
+                          filter(year == 2021,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2022),
+                        env_cov %>%
+                          filter(year == 2022,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2023),
+                        env_cov %>%
+                          filter(year == 2023,
+                                 month == 10))),
+  unlist(st_intersects( sf_s1 %>%
+                          filter(year == 2024),
+                        env_cov %>%
+                          filter(year == 2024,
+                                 month == 10)))
+)
+
+# length(grid0) == length(grid1)
+
+# join spatial data to fit model
+out_interannual <-
+  env_cov %>%
+  group_by(year) %>%
+  mutate(id = 1:n()) %>%
+  st_set_geometry(NULL) %>%
+  arrange(year, id) %>%
+  ungroup() %>%
+  mutate(id2 = 1:nrow(.),
+         yf = factor(year)) #%>%
+
+## gridded spatial domain----
+grid2 <-
+  env_cov %>%
+  filter(year == 2023) %>%
+  st_as_sfc()
+
+
+# load LOOCV outputs
+load(here::here("data/loocv_1_2.rdata"))
+load(here::here("data/loocv_3_4.rdata"))
+load(here::here("data/loocv_5_6.rdata"))
+
+# function to calculate RMSE
+# ~ 0 + te(depth, tidal_curr, k = 3) + s(temp, k = 4)
+calc_error <- function(model_cv,
+                       observed){
+  spat_resid <-
+    as.numeric(
+      st_distance(
+        model_cv$cv_preds %>%
+          st_as_sf(., coords = c("lon", "lat"),
+                   crs = ak_crs),
+        observed,
+        by_element = TRUE
+      )
+    )
+
+  rmse <-
+    data.frame(value = sqrt(mean(spat_resid^2)),
+               metric = "RMSE")
+  resid_df <- tibble(spat_resid)
+  return(list(rmse = rmse,
+              resid_df = resid_df))
+}
+
+movement_rmse <-
+  bind_rows(
+    calc_error(model_cv = m1_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 1),
+    calc_error(model_cv = m2_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 2),
+    calc_error(model_cv = m3_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 3),
+    calc_error(model_cv = m4_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 4),
+    calc_error(model_cv = m5_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 5),
+    calc_error(model_cv = m6_cv,
+               observed = sf_s1)[[1]] %>%
+      mutate(mod_num = 6)
+  )
+
+
+
+movement_resids <-
+  bind_rows(
+    calc_error(model_cv = m1_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 1),
+    calc_error(model_cv = m2_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 2),
+    calc_error(model_cv = m3_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 3),
+    calc_error(model_cv = m4_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 4),
+    calc_error(model_cv = m5_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 5),
+    calc_error(model_cv = m6_cv,
+               observed = sf_s1)[[2]] %>%
+      mutate(mod_num = 6)
+  )
+#
+#
+# ggplot(movement_resids) +
+#   geom_histogram(aes(spat_resid)) +
+#   facet_wrap(~mod_num, ncol = 1)
+
+save(movement_rmse,
+     movement_resids,
+     file = here::here("data/movement_model_LOOCV_stats.rdata"))

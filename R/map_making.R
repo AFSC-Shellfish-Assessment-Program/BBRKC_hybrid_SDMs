@@ -10,6 +10,9 @@ library(patchwork)
 library(smoothr)
 library(ggtext)
 
+# helper functions
+source(here::here("R/helpers.R"))
+
 # data processing----
 # Extend the BB management area to include those crab tagged just to the north of boundary
 load(here::here("data/spatial_layers.rdata"))
@@ -155,7 +158,7 @@ m2024 <-
   mutate(tag = factor(tag)) %>%
   st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
   st_transform(., crs = ak_crs) %>%
-  dream::sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+  sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
   st_set_geometry(NULL) %>%
   st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
   st_transform(., crs = ak_crs) %>%
@@ -197,7 +200,7 @@ surv_locs <-
   st_intersection(., polygon_sf %>%
                     st_transform(., 4326)) %>%
   st_transform(., ak_crs) %>%
-  dream::sfc_as_cols(., names = c('lon', 'lat')) %>%
+  sfc_as_cols(., names = c('lon', 'lat')) %>%
   st_set_geometry(NULL)
 
 # NBBTCA
@@ -497,7 +500,7 @@ outer_world <- ggplot() +
                            style = north_arrow_minimal(),
                            location = "bl",
                            pad_y = unit(10, "mm")) +
-  dream::theme_fade() +
+  theme_fade() +
   theme(axis.title = element_blank(),
         axis.text = element_blank(),
         axis.ticks = element_blank())

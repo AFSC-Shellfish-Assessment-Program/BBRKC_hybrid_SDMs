@@ -39,7 +39,6 @@ nbbtca <- other_sa %>% filter(name == "NBBTCA")
 process <- TRUE
 
 # load model particulars-----
-
 # load temperature data (october bottom temps from ROMS)----
 load(here::here('data/agg_temp_interannual_sum_aut_mom6.rdata'))
 
@@ -72,6 +71,9 @@ source(here::here("R/project_distribution.R"))
 
 # helper functions
 source(here::here("R/helpers.R"))
+
+## marginal effects
+source(here::here("R/effectDT.R"))
 
 # logbook data (unavailable online)-----
 load(here::here("data/dfl_data.rdata"))
@@ -205,7 +207,7 @@ ylims <- c(54.6, 58.9)
 xlims <- c(-169, -157.9)
 
 # NBBTCA
-nbbtca <-
+nbbtca_boundary <-
   st_read(here::here("data/162W_boundary_line.kml")) %>%
     st_zm() 
 ```
@@ -247,7 +249,8 @@ mod_tab <-
                     ),
   mod_num = 1:6) %>%
   left_join(., movement_rmse) %>%
-  filter(did_converge == "relative convergence (4)") %>% 
+  filter(did_converge %in% c("relative convergence (4)",
+                             "both X-convergence and relative convergence (5)")) %>%
   arrange(AIC) %>%
   mutate(delta_AIC = AIC - first(AIC)) %>%
   mutate_if(is.numeric, round, 2) %>%
@@ -329,102 +332,6 @@ for (i in 2021:2024){
                                      pop_up_env)))
 }
 
-# ggplot() + 
-#   geom_sf(data = ak_land) +
-#   geom_sf(data = agg_depth, aes(fill = depth)) +
-#   geom_sf(data = sf_s0_locs %>% filter(tag %in% c("244083", "244062"))) +
-#   geom_sf(data = sf_s1_locs %>% filter(tag %in% c("244083", "244062")), color = "red") +
-#   coord_sf(datum = ak_crs,
-#            xlim = c(-600, -400),
-#            ylim = c(600, 800))
-
-# individual changes in depth occupied between June and October
-depth_change <- 
-  combined_env %>% 
-    st_set_geometry(NULL) %>% 
-    dplyr::select(depth, state, tag) %>% 
-    group_by(state) %>%  
-    pivot_wider(id_cols = "tag", values_from = "depth", 
-                names_from = "state") %>% 
-    mutate(depth_change = `Deployment (June)` - `Pop-up (October)`) 
-
-# What percentage of tagged crab moved shallower between June-October?
-(nrow(depth_change %>% filter(depth_change < 0))/nrow(depth_change))*100
-
-shallower_tags <- depth_change %>% filter(depth_change > 0) %>% pull(tag) 
-  
-# summarise polygon of closure areas (NBBTCA + RKCSA/SSA)
-tsf <- manage_sf %>% 
-  filter(name != "BB survey") %>% 
-  summarise() %>% 
-  st_transform(., crs = ak_crs) %>% 
-  bind_rows(nbbtca %>% 
-              dplyr::select(geometry) %>% 
-              st_transform(., crs = ak_crs)) %>% 
-  summarise()
-
-# extract tags released in closure areas
-init <- st_intersection(tsf,
-                sf_s0_locs)
-
-# extract tags released east of -164 but not in a closure area
-intermediate_tags <- 
-  sf_s0_locs %>% 
-  filter(!tag %in% init$tag) %>% # exclude tags released inside closure areas
-  st_transform(., crs = 4326) %>% 
-  sfc_as_cols(., names = c("lon","lat")) %>% 
-  st_set_geometry(NULL) %>% 
-  filter(lon >= -164) %>% # find tags released east of -164
-  pull(tag)
-
-# extract tags tagged west of -164
-west_tags <- 
-  sf_s0_locs %>% 
-  st_transform(., crs = 4326) %>% 
-  sfc_as_cols(., names = c("lon","lat")) %>% 
-  st_set_geometry(NULL) %>% 
-  filter(lon <= -164) %>% 
-  pull(tag)
-
-# length(west_tags) + length(intermediate_tags) + length(init$tag) == 63
-
-# count tags released in closure areas that pop-up in closure areas
-st_intersection(tsf,
-                sf_s1_locs %>% 
-                  filter(tag %in% init$tag)) %>% 
-  nrow()
-
-# count tags released east of -164 that popped-up in closure areas
-st_intersection(tsf,
-                sf_s1_locs %>% 
-                  filter(tag %in% intermediate_tags)) %>% 
-  nrow()
-
-# count tags released west of -164 that pop-up in closure areas
-st_intersection(tsf,
-                sf_s1_locs %>% 
-                  filter(tag %in% west_tags)) %>% 
-  nrow()
-
-# count tags released in closure areas popping up in RKCSA/SSA specifically
-st_intersection(
-  manage_sf %>% 
-  filter(name != "BB survey") %>% 
-  summarise() %>% 
-  st_transform(., crs = ak_crs),
-  sf_s1_locs %>% 
-        filter(tag %in% init$tag)
-) %>% 
-  nrow()
-
-# count tags (all considered) that pop-up in closure areas
-st_intersection(tsf,
-                sf_s1_locs)
-
-# st_intersection(tsf,
-#                 cbb_tags) %>% 
-#   nrow()/nrow(cbb_tags) * 100
-
 # extract information about the distances traveled by tagged crab
 distance_traveled <- NULL
 for (y in 2021:2024){
@@ -449,46 +356,26 @@ for (y in 2021:2024){
 }
 
 # mean/sd distance traveled across all years
-mean(distance_traveled$dist)
-max(distance_traveled$dist)
-min(distance_traveled$dist)
-sd(distance_traveled$dist)
+round(mean(distance_traveled$dist))
+round(sd(distance_traveled$dist))
 
-# avg movement rates across all years
-distance_traveled %>% 
-  left_join(., oos_obs_movement %>% 
-              dplyr::mutate(tag = fct_to_num(tag)), 
-            by = c("year", "tag")) %>% 
-  mutate(movement_rate = as.numeric(dist)/deploy_days) %>% 
-  dplyr::summarise(mean_movement_rate  = mean(movement_rate),
-                   sd_movement_rate = sd(movement_rate))
-
-# crab distance traveled when released in closure areas
-distance_traveled %>% 
-  filter(tag %in% init$tag) %>% 
-  dplyr::summarise(m_dist = mean(dist),
-                   sd_dist = sd(dist))
-
-# crab distance traveled when released west of -164
-distance_traveled %>% 
-  filter(tag %in% west_tags) %>% 
-  dplyr::summarise(m_dist = mean(dist),
-                   sd_dist = sd(dist))
-
-# crab distance traveled when released outside closure areas
-distance_traveled %>% 
-  filter(!tag %in% init$tag) %>% 
-  dplyr::summarise(m_dist = mean(dist),
-                   sd_dist = sd(dist))
+# max/min distance traveled
+round(max(distance_traveled$dist))
+round(min(distance_traveled$dist))
 
 # calculate bearing from start and end locations
 bear_out <- NULL
 for (i in unique(sf_s0_locs$tag)){
-  start <- sf_s0_locs %>% filter(tag == i) %>% st_transform(., crs = 4326)
-  end <- sf_s1_locs %>% filter(tag == i)  %>% st_transform(., crs = 4326)
+  start <- sf_s0_locs %>% filter(tag == i) %>% 
+    st_transform(., crs = 4326)
+  end <- sf_s1_locs %>% filter(tag == i)  %>% 
+    st_transform(., crs = 4326)
   bear_int <- as.numeric(st_geod_azimuth(bind_rows(start, end))  * (180/pi))
-  assign("bear_out", rbind(bear_out, tibble(bearing = ((bear_int %% 360) + 360) %% 360, #0-360
-                                            tag = i)))
+  assign("bear_out", rbind(bear_out, 
+                           tibble(bearing = ((bear_int %% 360) + 360) %% 360, #0-360
+                                            tag = i)
+                           )
+         )
 }
 
 oos_obs_movement2 <- oos_obs_movement %>% left_join(., bear_out, by = "tag")
@@ -508,40 +395,80 @@ summ_stat_circ <- function(x, stat = "mean"){
   }
   return(out)
 }
-summ_stat_circ(oos_obs_movement2$bearing,
-               stat = "mean")
-summ_stat_circ(oos_obs_movement2$bearing,
-               stat = "sd")
+
+# direction of movement across all tags
+round(summ_stat_circ(oos_obs_movement2$bearing,
+               stat = "mean"))
+round(summ_stat_circ(oos_obs_movement2$bearing,
+               stat = "sd"))
+
+# summarise polygon of closure areas (NBBTCA + RKCSA/SSA)
+tsf <- manage_sf %>% 
+  filter(name != "BB survey") %>%
+  summarise() %>% 
+  st_transform(., crs = ak_crs) %>% 
+  bind_rows(nbbtca %>% 
+              dplyr::select(geometry) %>% 
+              st_transform(., crs = ak_crs)) %>% 
+  summarise()
+
+# extract tags released in closure areas
+init <- st_intersection(tsf,
+                sf_s0_locs)
+nrow(init)
+
+# count tags released in closure areas that popped-up in closure areas
+st_intersection(tsf,
+                sf_s1_locs %>% 
+                  filter(tag %in% init$tag)) %>% 
+  nrow()
+
+# count tags released in closure areas popping up in RKCSA/SSA specifically
+st_intersection(
+  manage_sf %>% 
+  filter(name != "BB survey") %>% 
+  summarise() %>% 
+  st_transform(., crs = ak_crs),
+  sf_s1_locs %>% 
+        filter(tag %in% init$tag)
+) %>% 
+  nrow()
 
 # bearing for crab released in closure areas
 oos_obs_movement2 %>% 
   filter(tag %in% init$tag) %>% 
-  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
-                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+  dplyr::summarise(m_bearing = round(summ_stat_circ(bearing, stat = "mean")),
+                   sd_bearing = round(summ_stat_circ(bearing, stat = "sd")))
 
-# bearing for crab not released in closure areas
-oos_obs_movement2 %>% 
-  filter(!tag %in% init$tag) %>% 
-  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
-                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+# crab distance traveled when released in closure areas
+distance_traveled %>% 
+  filter(tag %in% init$tag) %>% 
+  dplyr::summarise(m_dist = round(mean(dist)),
+                   sd_dist = round(sd(dist)))
+
+# extract tags tagged west of -164
+west_tags <- 
+  sf_s0_locs %>% 
+  st_transform(., crs = 4326) %>% 
+  sfc_as_cols(., names = c("lon","lat")) %>% 
+  st_set_geometry(NULL) %>% 
+  filter(lon <= -164) %>% 
+  pull(tag)
+length(west_tags)
 
 # bearing for crab released west of -164
 oos_obs_movement2 %>% 
   filter(tag %in% west_tags) %>% 
-  dplyr::summarise(m_bearing = summ_stat_circ(bearing, stat = "mean"),
-                   sd_bearing = summ_stat_circ(bearing, stat = "sd"))
+  dplyr::summarise(m_bearing = round(summ_stat_circ(bearing, stat = "mean")),
+                   sd_bearing = round(summ_stat_circ(bearing, stat = "sd")))
 
-# movement comparisons (t test and watson williams test)------
+# crab distance traveled when released west of -164
+distance_traveled %>% 
+  filter(tag %in% west_tags) %>% 
+  dplyr::summarise(m_dist = round(mean(dist)),
+                   sd_dist = round(sd(dist)))
 
-## distance traveled----
-dist_comp_df <- 
-  distance_traveled %>% 
-  mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")),
-         dist = as.numeric(dist))
-
-t.test(dist ~ east_west, data = dist_comp_df)
-
-## bearing----
+# comparing bearings---------
 dir_comp_df <- 
   oos_obs_movement2  %>% 
   mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")))
@@ -556,7 +483,6 @@ east_bear <- circular(dir_comp_df %>% filter(east_west == "east") %>% pull(beari
          template = "geographics",
          modulo = "2pi")
 
-
 # combine and label
 angles <- c(west_bear, east_bear)
 grp    <- factor(rep(c("west", "east"), c(length(west_bear), length(east_bear))))
@@ -564,31 +490,52 @@ grp    <- factor(rep(c("west", "east"), c(length(west_bear), length(east_bear)))
 # Watson–Williams test for comparing groups of angles
 watson.williams.test(angles, grp)
 
-# depth and tidal current comparison
+## comparing distance traveled----
+dist_comp_df <- 
+  distance_traveled %>% 
+  mutate(east_west = factor(ifelse(tag %in% west_tags, "west", "east")),
+         dist = as.numeric(dist))
+
+t.test(dist ~ east_west, data = dist_comp_df)
+
+# individual changes in depth occupied between June and October
+depth_change <- 
+  combined_env %>% 
+    st_set_geometry(NULL) %>% 
+    dplyr::select(depth, state, tag) %>% 
+    group_by(state) %>%  
+    pivot_wider(id_cols = "tag", values_from = "depth", 
+                names_from = "state") %>% 
+    mutate(depth_change = `Deployment (June)` - `Pop-up (October)`) 
+
+# What percentage of tagged crab moved shallower between June-October?
+round((nrow(depth_change %>% filter(depth_change < 0))/nrow(depth_change))*100)
+
+shallower_tags <- depth_change %>% filter(depth_change > 0) %>% pull(tag) 
+
+# depth and tidal current comparison across -164 W
 depth_comp <- 
   combined_env %>%
   mutate(loc = factor(ifelse(tag %in% west_tags, "west", "east")))
 
 t.test(depth ~ loc, data = depth_comp)
+
+depth_comp %>% 
+  group_by(loc) %>% 
+  dplyr::summarise(m_depth = round(mean(depth)),
+                   sd_depth = round(sd(depth)))
+
 t.test(tidal_curr ~ loc, data = depth_comp)
 
 depth_comp %>% 
   group_by(loc) %>% 
-  dplyr::summarise(m_depth = mean(depth),
-                   sd_depth = sd(depth))
-
-depth_comp %>% 
-  group_by(loc) %>% 
-  dplyr::summarise(m_tidal_curr = mean(tidal_curr),
-                   sd_tidal_curr = sd(tidal_curr))
+  dplyr::summarise(m_tidal_curr = round(mean(tidal_curr)),
+                   sd_tidal_curr = round(sd(tidal_curr)))
 ```
 
 ## Marginal habitat preference smooths
 
 ```{r, fig.width = 9, fig.height=5}
-## marginal effects wrapper for marginaleffects package (adapted from Thorson and Kristensen 2024)
-source(here::here("R/effectDT.R"))
-
 fit <- list(obj = pref_mod$obj,
             opt = pref_mod$opt,
             sd = pref_mod$sd,
@@ -633,27 +580,24 @@ pred_int = predictions( fit,
                          center=TRUE,
                          param="beta_k")
 
-pref_df <- 
-  pred_int %>% 
-  as.data.frame() %>% 
-  mutate(tidal_curr2 = round(tidal_curr),
-         depth2 = round(depth))
+# exclude predictions too far from observations
+tf <- exclude.too.far(pred_int$tidal_curr,
+                      pred_int$depth,
+                      combined_env$tidal_curr,
+                      combined_env$depth,
+                    0.15)
 
-obs_bubs <- 
-  df_grid %>% 
-    st_set_geometry(NULL) %>% 
-    st_as_sf(., coords = c("tidal_curr", "depth")) %>% 
-    concaveman(., concavity = 3) %>% 
-    st_buffer(., dist = 2.5)
-
-pred_int2 <- 
-  pred_int %>% 
-    as.data.frame() %>% 
-    st_as_sf(., coords = c("tidal_curr", "depth")) %>% 
-    st_intersection(., obs_bubs) %>% 
-    sfc_as_cols(., names = c("tidal_curr", "depth")) %>% 
-    st_set_geometry(NULL)
-
+pred_int2 <- pred_int[!tf,]
+# The x axis for the temperature preference plot ranges between the minimum and maximum
+# October temperatures for 2021-2024. We don't extend the preference function lower
+# than the lower bound of October temperatures, because the bottom temperatures at tag deployment
+# in June don't occur in October, so crab cannot choose to go towards them. The situation is different
+# in the 2D plot of preference, where covariates are static. In this case, crab can choose to stay 
+# in the temperature/current velocity habitat that the occupy in June. Therefore, we extend the 
+# preference surface to encompass preferences at both tag deployment and pop-up locations, assuming that
+# the preference space in between deployment and pop-up locations is fair game. We
+# also add a buffer to the points to show predicted preference at depth/current velocity combinations
+# near deployment and pop-up, presumably habitats that crab could have moved into but didn't.
 
 # visualize marginal effect smooths
 temp_smooth_plt <-
@@ -676,7 +620,7 @@ depth_tc_effect_plt <-
   ggplot(data = pred_int2,
          aes(y = depth, x = tidal_curr)) +
     geom_raster(aes(fill = estimate), show.legend = T) +
-    geom_contour(aes(z = estimate), color = "black") +
+    geom_contour(aes(z = estimate), color = "black", bins = 15) +
       geom_point(data = combined_env,
              aes(y = depth, x = tidal_curr, color = state), size = 2) +
       scale_color_manual(values = c("Deployment (June)" = "black",
@@ -765,7 +709,8 @@ spat_pref <- env_cov_full %>%
                       include.lowest = TRUE,
                       labels = paste0(seq(0, 90, by = 10), 
                                       "–", seq(10, 100, by = 10), "%")
-                    )
+                    ),
+    pref_dec2 = factor( ntile(preference, n = 10) * 10 )
   ) %>% 
   st_as_sf() %>% 
   st_transform(., crs = 4326)
@@ -863,7 +808,6 @@ tag_cond_out$inside_outside <- ifelse(tag_cond_out$tag %in% init$tag,
                                       "inside",
                                       "outisde")
 
-
 tag_cond_out %>% 
   group_by(inside_outside) %>% 
   dplyr::summarise(m_depth = mean(depth),
@@ -902,6 +846,31 @@ t.test(tidal_curr ~ east_west, data = tag_cond_out)
 * Overlap is estimated later using bootstrap method.
 * Fishery CPUE data are aggregated to grid cell here, and this does matter for overlap (`lb_agg`). 
 * Also calculated here are fishery CPUE centroids that are also important.
+
+```{r}
+# find the fraction of CPUEs that occurred within the boundary of the prediction 
+# grid by year
+pg_outer <- 
+  pred_grid %>%
+  filter(year == 2023, month == 10) %>%
+  st_as_sfc() %>% 
+  st_union() 
+
+inside_catches <- NULL
+catch_yrs <- unique(lb$year)
+for (i in seq_along(catch_yrs)){
+  lb_int <- lb %>% filter(year == catch_yrs[i])
+  lb_inside <- nrow(st_intersection(lb_int, pg_outer))
+  prop_inside <- round(lb_inside/nrow(lb_int), 4) * 100
+  assign("inside_catches", rbind(inside_catches, 
+                                 tibble(year = catch_yrs[i],
+                                        prop_inside,
+                                        n_inside = lb_inside,
+                                        n_outside = nrow(lb_int) - lb_inside)))
+}
+inside_catches
+```
+
 * Between 99.6% and 100% of fishery catch observations fell within the prediction boundary used to calculate overlap across study years. In 2017, 5 of 1199 observations fell outside the prediction grid (99.6%). 
 
 ```{r, warning=F, echo = T}
@@ -1581,9 +1550,14 @@ for (y in 2005:2024){
   assign("lb_cog", rbind(lb_cog_int, lb_cog))
 }
 
-
+dist_comps <-   
+  sim_out_diff_v2 %>%
+    group_by(year, sim) %>%
+    dplyr::summarise(bhat_proj = sum(sqrt(p_catch * p_proj)),
+                     bhat_diff = sum(sqrt(p_catch * p_diff)))
 bhat_eta <- NULL
 for (i in c(2005:2019, 2023:2024)) {
+
   # print(dist_comps %>% filter(year == i) %>% pull(bhat_diff) %>% unique() %>% length())
   bhat_proj <- dist_comps %>% filter(year == i) %>% pull(bhat_proj)
   bhat_diff <- dist_comps %>% filter(year == i) %>% pull(bhat_diff)
@@ -1593,12 +1567,11 @@ for (i in c(2005:2019, 2023:2024)) {
 
   # Estimate overlapping area (type = "2" for proportion)
   overlap_results <- overlap(data_list, type = "2", plot = FALSE)
-  print(final.plot(data_list) +
-    labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
+  # print(final.plot(data_list) +
+  #   labs(title = paste(i, "Proportion overlapping:",round(print(overlap_results)$OV, 5))))
   assign("bhat_eta", rbind(bhat_eta, tibble(year = i,
                                             bhat_eta = overlap_results$OV)))
 }
-
 ```
 
 
@@ -1868,14 +1841,11 @@ ggsave(b_diff_plt,
        dpi = 300,
        width = 5,
        height = 4)
-
-
 ```
 
 ### Temperature effects on centroid positions
 
 ```{r}
-
 map_temp_plt <-
   # projected density centroids
   ggplot(temp_combined)+
@@ -1918,7 +1888,8 @@ map_temp_plt <-
     theme(legend.key.height = unit(0.4, "cm"),
           legend.title = element_text(size = 12),
           axis.title = element_text(size = 12),
-          axis.text = element_text(size = 9)) 
+          axis.text = element_text(size = 9),
+          axis.text.x = element_text(angle = 35))  +
   
   #fishery CPUE centroids
   ggplot(temp_combined)+
@@ -1954,7 +1925,8 @@ map_temp_plt <-
     theme(legend.key.height = unit(0.4, "cm"),
           legend.title = element_text(size = 12),
           axis.title = element_text(size = 12),
-          axis.text = element_text(size = 9))  +
+          axis.text = element_text(size = 9),
+          axis.text.x = element_text(angle = 35))  +
     plot_layout(guides = "collect") +
     plot_annotation(tag_levels = "a",
                     tag_prefix = "(",

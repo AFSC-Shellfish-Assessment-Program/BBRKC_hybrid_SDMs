@@ -17,17 +17,6 @@ sim_out_diff_v2 <-
       mutate(sim = sim + 750))
 
 
-dist_comps <-
-  bind_rows(
-    dist_comps.1,
-    dist_comps.2 %>%
-      mutate(sim = sim + 250),
-    dist_comps.3 %>%
-      mutate(sim = sim + 500),
-    dist_comps.4 %>%
-      mutate(sim = sim + 750)
-  )
-
 cog_out_diff <-
   bind_rows(
     cog_out_diff.1,
@@ -71,6 +60,5 @@ ovlp_ts_v2 <-
                    lwr95_cog_lon_diff = quantile(cog_lon_diff, 0.025, na.rm = T))
 
 save(sim_out_diff_v2,
-     dist_comps,
      ovlp_ts_v2,
      file = here::here("data/ovlp_sims.rdata"))

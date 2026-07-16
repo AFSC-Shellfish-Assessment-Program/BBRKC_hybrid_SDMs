@@ -260,7 +260,7 @@ for (yr in all_years){
 
 
 save(sim_out_diff_v2.3,
-     dist_comps.3,
-     ovlp_ts_v2.3,
+     # dist_comps.3,
+     # ovlp_ts_v2.3,
      cog_out_diff.3,
      file = here::here("data/ovlp_sims3.rdata"))

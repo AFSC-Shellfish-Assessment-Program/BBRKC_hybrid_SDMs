@@ -26,7 +26,7 @@ bb_ll <- st_bbox(c(
 ## boundary and grid data---
 load(here::here("data/spatial_layers.rdata"))
 
-## load temperature data (october bottom temps from ROMS)----
+## load temperature data (october bottom temps from MOM6)----
 load(here::here('data/agg_temp_interannual_sum_aut_mom6.rdata'))
 
 ## load bathymetry data----
@@ -57,7 +57,6 @@ pred_grid <-
   st_transform(., crs = ak_crs) %>%
   st_intersection(ebs)
 
-
 # crabpack query----
 # download and process NMFS EBS BTS data and calculate CPUE using crabpack
 species <- "RKC"
@@ -66,7 +65,7 @@ years <- 2005:2024
 channel <- "API"
 
 specimen_data_ebs_rkc <- crabpack::get_specimen_data(species = species,
-                                                     region = region1, # Eastern Bering Sea and Northern Bering Sea
+                                                     region = region1, # Eastern Bering Sea
                                                      years = years,
                                                      channel = channel)
 
@@ -95,7 +94,7 @@ df_sf <-
                 lat = latitude) %>%
   left_join(.,
             haul_df_rkc) %>%
-  mutate(cpue = cpue/3.429) %>% # convert CPUE from nm^-2 to km^-2
+  mutate(cpue = cpue/3.429) %>% # convert CPUE from crab nm^-2 to crab km^-2
   st_as_sf(., coords = c("lon","lat"), crs = 4326) %>%
   st_transform(., crs = ak_crs)
 
@@ -172,7 +171,7 @@ tictoc::toc()
 sanity(m1_sdm_dl1)
 
 # cross-validation-------------------------------------------------------------------
-## tweedie
+# tweedie
 m1_sdm_tw_cv <- sdmTMB::sdmTMB_cv(
   k_folds = 8,
   formula = cpue ~ 0 + as.factor(year),
@@ -270,7 +269,7 @@ ks.test(mcmc_res2, pnorm)
 ### mesh figure-----
 ak_land2 <- ak_land %>%
   st_intersection(, bb_ll)
-#
+
 png(filename = here::here("figs/supp_map/ebs_mesh.png"),
     width = 6, height = 6,
     units = "in", res = 300)

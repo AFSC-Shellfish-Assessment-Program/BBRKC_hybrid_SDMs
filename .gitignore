@@ -4,7 +4,10 @@
 .Ruserdata
 data/new_mom6/
 data/rkc.logbook.clean.csv
+data/rkc.logbook.clean.gsheet
 data/ovlp_sims.rdata
 data/dfl_data.rdata
 data/Clean DFL data/
 docs/
+R/RKC_movement_model_results.html
+R/process_dfl_data.R

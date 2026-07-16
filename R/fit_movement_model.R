@@ -111,22 +111,59 @@ male_crab_movement <-
     m2021 %>%
       dplyr::select(tag, deploy_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year) ,
+                    year, cl, model) ,
     m2022 %>%
       dplyr::select(tag, deploy_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year) ,
+                    year, cl = carapace_length, model) ,
     m2023 %>%
       dplyr::select(tag, deploy_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year),
+                    year, cl = length, model),
     m2024 %>%
       dplyr::select(tag, deploy_t, deploy_days,
                     t0, lat0, lon0, deploy_lon, deploy_lat,
-                    year)
+                    year, cl = length_mm, model)
   ) %>%
   filter(tag != "263793")
 
+# Tagging summary statistics for Table 1
+male_crab_movement %>%
+  group_by(year) %>%
+  dplyr::summarise(avg_days_deployed = mean(deploy_days),
+                   avg_carapace_length = mean(cl),
+                   sd_carapace_length = sd(cl),
+                   min_deploy_date = min(as.Date(deploy_t, format = "%m/%d/%Y")),
+                   max_deploy_date = max(as.Date(deploy_t, format = "%m/%d/%Y")),
+                   min_release_date = min(as.Date(t0, format = "%m/%d/%Y")),
+                   max_release_date = max(as.Date(t0, format = "%m/%d/%Y")),
+                   n_mrPAR = sum(model == "mrPAT"),
+                   n_miniPAT = sum(model == "MiniPAT"))
+
+# median tag deployment date by year vs 2020----------------------
+# m2020 <-
+#   read_csv(here::here("data/2020_Oct_BBRKC_FINAL_CRABTAGSONLY.csv")) %>%
+#   rename_all(str_to_lower) %>%
+#   rename_all(function(x){str_replace(x, "\\.", "_")}) %>%
+#   rename(deploy_lon = depllong,
+#          deploy_lat = depllat) %>%
+#   mutate(tag = factor(tag)) %>%
+#   st_as_sf(., coords = c("deploy_lon","deploy_lat"), crs = 4326) %>%
+#   st_transform(., crs = ak_crs) %>%
+#   sfc_as_cols(., names = c("deploy_lon","deploy_lat")) %>%
+#   st_set_geometry(NULL) %>%
+#   st_as_sf(., coords = c("lon0","lat0"), crs = 4326) %>%
+#   st_transform(., crs = ak_crs) %>%
+#   sfc_as_cols(., names = c("lon0","lat0")) %>%
+#   st_set_geometry(NULL) %>%
+#   mutate(year = 2020)
+
+male_crab_movement %>%
+  group_by(year) %>%
+  dplyr::summarise(med_deploy_date = median(as.Date(deploy_t, format = "%m/%d/%Y")))
+
+# m2020 %>%
+#   dplyr::summarise(med_deploy_date = median(as.Date(deploy_t, format = "%m/%d/%Y")))
 
 # deployment locations-----
 sf_s0 = st_as_sf(male_crab_movement[,c('deploy_lon','deploy_lat','year')],
@@ -139,7 +176,6 @@ sf_s1 <- st_as_sf(male_crab_movement[,c('lon0','lat0','year')],
                   coords = c('lon0','lat0'),
                   crs = ak_crs)
 s1 <- st_coordinates(sf_s1)
-
 
 ## environmental covariates----
 env_cov_full <- agg_temp_interannual_sum_aut %>%
@@ -313,7 +349,7 @@ save(m1.t,
      m6.t,
      file = here::here("data/fitted_movement_models.rdata"))
 
-
+#
 save(grid2,
      male_crab_movement,
      file = here::here("data/movement_model_particulars.rdata"))
